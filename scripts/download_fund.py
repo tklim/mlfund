@@ -5,8 +5,10 @@ Downloads NAV history and dividend data for specified fund codes from Manulife I
 """
 
 import os
+import re
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -17,7 +19,27 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.102 Safari/537.36",
     "Accept": "application/json",
 }
-OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+DATA_DIR = REPO_ROOT / "data"
+
+
+def sanitize_label(value):
+    """Return a compact filesystem-safe label."""
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "", str(value or ""))
+    return cleaned or "Unknown"
+
+
+def short_fund_label(fund_id, fund_name):
+    """
+    Convert a full fund name into a compact label.
+    Example: Manulife Investment Greater China Fund -> MAKGCF_GreaterChina
+    """
+    short_name = re.sub(r"\bManulife\b", "", str(fund_name or ""), flags=re.IGNORECASE)
+    short_name = re.sub(r"\bInvestment\b", "", short_name, flags=re.IGNORECASE)
+    short_name = re.sub(r"\bFund\b", "", short_name, flags=re.IGNORECASE)
+    short_name = re.sub(r"\s+", " ", short_name).strip()
+    return f"{fund_id}_{sanitize_label(short_name)}"
 
 
 def get_dividends(fund_id):
@@ -112,19 +134,20 @@ def download_fund(fund_id, years=3):
     df = df[cols]
 
     # Save CSV (handle locked files)
-    base_file = f"manulife_{fund_id}_nav_{years}Y.csv"
-    out_path = os.path.join(OUTPUT_DIR, base_file)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    if os.path.exists(out_path):
+    fund_label = short_fund_label(fund_id, fund_name)
+    base_file = f"{fund_label}_nav_{years}Y.csv"
+    out_path = DATA_DIR / base_file
+
+    if out_path.exists():
         try:
-            with open(out_path, "a"):
+            with out_path.open("a"):
                 pass
         except IOError:
             # File locked - use timestamp
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = os.path.join(
-                OUTPUT_DIR, f"manulife_{fund_id}_nav_{years}Y_{ts}.csv"
-            )
+            out_path = DATA_DIR / f"{fund_label}_nav_{years}Y_{ts}.csv"
 
     df.to_csv(out_path, index=False)
     print(f"Saved: {out_path}")
@@ -132,13 +155,14 @@ def download_fund(fund_id, years=3):
     return {
         "fund_id": fund_id,
         "fund_name": fund_name,
+        "fund_label": fund_label,
         "current_nav": current_price,
         "current_date": current_date,
         "change": change,
         "change_pct": change_pct,
         "dividend_count": len(dividends),
         "records": len(df),
-        "output_path": out_path,
+        "output_path": str(out_path),
     }
 
 

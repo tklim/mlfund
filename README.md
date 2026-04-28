@@ -14,38 +14,76 @@ Automated NAV (Net Asset Value) and dividend data downloader for Manulife Invest
 ## Installation
 
 ```bash
-pip install pandas requests
+pip install pandas requests pygad matplotlib numpy
 ```
 
 ## Usage
 
 ### Download Single Fund
 ```bash
-python download_fund.py MAKGCF
+python scripts/download_fund.py MAKGCF
 ```
 
 ### Download Multiple Funds
 ```bash
-python download_fund.py MAKGCF MAPF APCR
+python scripts/download_fund.py MAKGCF MAPF APCR
 ```
 
 ### Download All Tracked Funds
 ```bash
-python download_fund.py --all
+python scripts/download_fund.py --all
 ```
 
 ### Quick Summary (No Download)
 ```bash
-python download_fund.py --summary
+python scripts/download_fund.py --summary
 ```
 
 ### Default Behavior (No Arguments)
 Downloads all funds in the `TRACKED_FUNDS` list.
 
+## Backtesting
+
+The repo includes [backtest-ema-ga10-index.py](C:/Users/tklim/OpenWork/mlfund/scripts/backtest-ema-ga10-index.py), which reads fund CSV files from `data/` and uses `TotalReturn` as the default price series for backtesting.
+
+### Backtest All Local Fund CSVs
+
+This will automatically find files matching `*_nav_*Y.csv` inside `data/`:
+
+```bash
+python scripts/backtest-ema-ga10-index.py --pop_ranges 10 --gen_ranges 10 --ga-search-preset focused
+```
+
+### Backtest One Fund CSV
+
+```bash
+python scripts/backtest-ema-ga10-index.py --data-file data/MAPF_Progress_nav_3Y.csv --pop_ranges 10 --gen_ranges 10 --ga-search-preset focused
+```
+
+### Use a Different Price Column
+
+By default the script uses `TotalReturn`. If you want to test raw NAV instead:
+
+```bash
+python scripts/backtest-ema-ga10-index.py --data-file data/MAPF_Progress_nav_3Y.csv --price-column NAV --pop_ranges 10 --gen_ranges 10 --ga-search-preset focused
+```
+
+### Why `--ga-search-preset focused`?
+
+`--pop_ranges 10 --gen_ranges 10` makes each GA run small, but the script can still try many mutation/crossover combinations during tuning. `--ga-search-preset focused` reduces that search to a single focused setting so the run finishes much faster.
+
+### Backtest Output
+
+Each run generates:
+
+- A text log file in `outputs/logs/` such as `MAPF_Progress-2Y-6M-generic-ga10-YYYYMMDD_HHMMSS.txt`
+- A chart PNG in `outputs/charts/` such as `MAPF_Progress-2Y-6M-generic-ga10-tuned-YYYYMMDD-HHMMSS.png`
+- A GA tuning summary in `outputs/tunings/` such as `ga_tuning_summary_YYYYMMDD_HHMMSS.csv`
+
 ## Output
 
-CSV files are saved to the `mlfund` folder with the format:
-`manulife_{FUND_ID}_nav_{YEARS}Y.csv`
+CSV files are saved to the `data/` folder with the format:
+`{FUND_ID}_{ShortName}_nav_{YEARS}Y.csv`
 
 ### CSV Columns
 
@@ -101,11 +139,18 @@ Find more fund codes at: https://www.manulifeim.com.my/funds/fund-prices.html
 
 ```
 mlfund/
-├── download_fund.py          # Main download script
-├── README.md                 # This file
-├── manulife_MAKGCF_nav_3Y.csv  # Greater China Fund data
-├── manulife_MAPF_nav_3Y.csv   # Progress Fund data
-└── manulife_APCR_nav_3Y.csv   # Asia-Pacific REIT Fund data
+├── scripts/
+│   ├── download_fund.py
+│   └── backtest-ema-ga10-index.py
+├── data/
+│   ├── MAKGCF_GreaterChina_nav_3Y.csv
+│   ├── MAPF_Progress_nav_3Y.csv
+│   └── APCR_AsiaPacificREIT_nav_3Y.csv
+├── outputs/
+│   ├── logs/
+│   ├── charts/
+│   └── tunings/
+└── README.md
 ```
 
 ## Automation
@@ -113,12 +158,12 @@ mlfund/
 ### Windows Task Scheduler
 Create a scheduled task to run daily:
 ```bash
-schtasks /create /tn "ManulifeFundDownload" /tr "python C:\Users\tklim\OpenWork\mlfund\download_fund.py" /sc daily /st 18:00
+schtasks /create /tn "ManulifeFundDownload" /tr "python C:\Users\tklim\OpenWork\mlfund\scripts\download_fund.py" /sc daily /st 18:00
 ```
 
 ### Cron (Linux/Mac)
 ```bash
-0 18 * * * cd /path/to/mlfund && python download_fund.py
+0 18 * * * cd /path/to/mlfund && python scripts/download_fund.py
 ```
 
 ## Notes

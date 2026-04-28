@@ -14,6 +14,7 @@ from pathlib import Path
 import itertools  # For grid search over GA hyperparameters
 import argparse
 import signal
+import re
 
 try:
     import yfinance as yf
@@ -34,6 +35,19 @@ batch_name = f"{csv_name}-{lookback_years}Y-{offset_months}M"
 started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 strategy_profile = "generic"
 ga_seed = None
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+DATA_DIR = REPO_ROOT / "data"
+OUTPUTS_DIR = REPO_ROOT / "outputs"
+LOGS_DIR = OUTPUTS_DIR / "logs"
+CHARTS_DIR = OUTPUTS_DIR / "charts"
+TUNINGS_DIR = OUTPUTS_DIR / "tunings"
+
+FUND_CODE_TO_SHORT_NAME = {
+    "MAKGCF": "GreaterChina",
+    "MAPF": "Progress",
+    "APCR": "AsiaPacificREIT",
+}
 
 STRATEGY_PROFILE_SETTINGS = {
     "generic": {
@@ -220,7 +234,7 @@ def parse_args():
     )
     parser.add_argument(
         "--fund-glob",
-        default="manulife_*_nav_*Y.csv",
+        default="*_nav_*Y.csv",
         help="Local Manulife CSV glob to backtest when no data file is supplied"
     )
     parser.add_argument(
@@ -314,6 +328,54 @@ def build_deterministic_seed(*parts):
     seed_material = "|".join(str(part) for part in parts)
     return int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16)
 
+
+def sanitize_label(value):
+    """Return a filesystem-safe compact label."""
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "", str(value or ""))
+    return cleaned or "Unknown"
+
+
+def infer_fund_output_label(csv_file):
+    """
+    Build a concise fund label for filenames/titles.
+    Examples:
+    - manulife_MAKGCF_nav_3Y.csv -> MAKGCF_GreaterChina
+    - MAKGCF_GreaterChina_nav_3Y.csv -> MAKGCF_GreaterChina
+    """
+    stem = Path(csv_file).stem
+    new_name_match = re.search(r"^([A-Za-z0-9]+)_([A-Za-z0-9]+)_nav_", stem, re.IGNORECASE)
+    if new_name_match:
+        fund_code = new_name_match.group(1).upper()
+        short_name = new_name_match.group(2)
+        return f"{fund_code}_{sanitize_label(short_name)}"
+
+    legacy_match = re.search(r"manulife_([A-Za-z0-9]+)_nav_", stem, re.IGNORECASE)
+    if legacy_match:
+        fund_code = legacy_match.group(1).upper()
+        short_name = FUND_CODE_TO_SHORT_NAME.get(fund_code, fund_code)
+        return f"{fund_code}_{sanitize_label(short_name)}"
+
+    return sanitize_label(stem)
+
+
+def ensure_output_dirs():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+    TUNINGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_input_csv_path(csv_file):
+    candidate = Path(csv_file)
+    if candidate.is_absolute():
+        return candidate
+    if candidate.exists():
+        return candidate.resolve()
+    data_candidate = DATA_DIR / candidate
+    if data_candidate.exists():
+        return data_candidate.resolve()
+    return candidate.resolve()
+
 def csv_str_to_int_list(value, default=None):
     if not value:
         return default if default is not None else []
@@ -399,6 +461,7 @@ def download_market_data(symbol, years=2, interval="1d"):
     """Download market data from Yahoo Finance and save it to a local CSV."""
     if yf is None:
         raise ImportError("yfinance is not installed. Install it with: pip install yfinance")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     end_date = pd.Timestamp.today().normalize() + pd.Timedelta(days=1)
     start_date = end_date - pd.DateOffset(years=years)
@@ -430,10 +493,10 @@ def download_market_data(symbol, years=2, interval="1d"):
     ]
     df_downloaded = df_downloaded[keep_cols]
 
-    csv_file = f"{safe_symbol_name(symbol)}-{years}y-{pd.Timestamp.today():%Y%m%d}.csv"
+    csv_file = DATA_DIR / f"{safe_symbol_name(symbol)}-{years}y-{pd.Timestamp.today():%Y%m%d}.csv"
     df_downloaded.to_csv(csv_file, index=False)
     print(f"Saved {symbol} data to {csv_file} ({len(df_downloaded)} rows)")
-    return csv_file
+    return str(csv_file)
 
 def calculate_ema(prices, period):
     """Calculate Exponential Moving Average"""
@@ -1332,6 +1395,7 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=(3,10), long_ema_bounds=(80,30
     log_print("\nGA Hyperparameter Tuning Results:")
     log_print(results_df.to_string(index=False))
     tune_csv = f"ga_tuning_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    tune_csv = TUNINGS_DIR / tune_csv
     results_df.to_csv(tune_csv, index=False)
     log_print(f"\nFull results saved to: {tune_csv}")
     log_print(f"Best combo (max score {best_score:.3f}): pop={best_combo[0]}, gens={best_combo[1]}, mut={best_combo[2]}, cross={best_combo[3]}")
@@ -1350,7 +1414,9 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
     global gen_ranges, mutation_rates, crossover_rates, reuse_tuned_params
     global batch_name, started_at, strategy_profile, ga_seed
 
-    csv_name = Path(csv_file).stem
+    ensure_output_dirs()
+    csv_path = resolve_input_csv_path(csv_file)
+    csv_name = infer_fund_output_label(csv_path)
     lookback_years = lookback_years_value
     offset_months = offset_months_value
     pop_ranges = pop_ranges_value
@@ -1364,7 +1430,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
     started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     now = datetime.now()
-    log_filename = f"{csv_name}-{lookback_years}Y-{offset_months}M-{strategy_profile}-ga10-{now.strftime('%Y%m%d_%H%M%S')}.txt"
+    log_filename = LOGS_DIR / f"{csv_name}-{lookback_years}Y-{offset_months}M-{strategy_profile}-ga10-{now.strftime('%Y%m%d_%H%M%S')}.txt"
     log_file = open(log_filename, 'w')
     log_print(f"=== Trading Strategy Backtest Log ===")
     log_print(f"Started at: {now.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1378,7 +1444,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         log_print(f"Profile override preset: {profile_override_preset}")
 
     try:
-        df_clean = pd.read_csv(csv_file)
+        df_clean = pd.read_csv(csv_path)
 
         if 'Date' in df_clean.columns:
             df_clean['Date'] = pd.to_datetime(df_clean['Date'], errors='coerce')
@@ -1416,7 +1482,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         df_clean = df_clean.set_index('Date')
         df_clean['RSI'] = calculate_rsi(df_clean['NAV'], 14)
 
-        log_print(f"Loading data from {csv_file}...")
+        log_print(f"Loading data from {csv_path}...")
         log_print(f"Price data loaded from {price_col}: {len(df_clean)} valid data points")
         log_print(
             f"Date range: {df_clean.index.min().strftime('%Y-%m-%d')} "
@@ -1649,7 +1715,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             )
 
         tuned_summary = best_ga_params if best_ga_params is not None else "not retuned"
-        log_print(f"\n=== BACKTESTING RESULTS {csv_file}-{lookback_years}Y-{offset_months}M [{strategy_profile}] ===")
+        log_print(f"\n=== BACKTESTING RESULTS {csv_path}-{lookback_years}Y-{offset_months}M [{strategy_profile}] ===")
         log_print(f"Adaptive Enhanced Strategy Return:  {final_return:.2f}%  <<< ga10 (profile: {strategy_profile}, tuned: {tuned_summary})")
         log_print(f"Buy & Hold Return: {bh_return:.2f}%")
         log_print(f"Excess Return vs Buy & Hold: {excess_return:.2f}%")
@@ -1750,7 +1816,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         plt.tight_layout()
 
         formatted = datetime.now().strftime("%Y%m%d-%H%M%S")
-        png_file = f"{csv_name}-{lookback_years}Y-{offset_months}M-{strategy_profile}-ga10-tuned-{formatted}.png"
+        png_file = CHARTS_DIR / f"{csv_name}-{lookback_years}Y-{offset_months}M-{strategy_profile}-ga10-tuned-{formatted}.png"
         plt.savefig(png_file, dpi=200, bbox_inches="tight")
         plt.close()
         log_print(f"\nChart saved to: {png_file}")
@@ -1777,6 +1843,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
 # Main execution (minor updates for rsi_period in backtest calls)
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, handler)
+    ensure_output_dirs()
     args = parse_args()
     profile_override_preset = args.profile_override_preset
     apply_profile_override_preset(args.strategy_profile, profile_override_preset)
@@ -1820,10 +1887,10 @@ if __name__ == "__main__":
     elif args.data_file:
         downloaded_files.append(args.data_file)
     else:
-        local_fund_files = sorted(str(path) for path in Path.cwd().glob(args.fund_glob))
+        local_fund_files = sorted(str(path.resolve()) for path in DATA_DIR.glob(args.fund_glob))
         if local_fund_files:
             downloaded_files.extend(local_fund_files)
-            print(f"Found {len(local_fund_files)} local Manulife CSV file(s) matching {args.fund_glob}.")
+            print(f"Found {len(local_fund_files)} local fund CSV file(s) in {DATA_DIR} matching {args.fund_glob}.")
         else:
             if args.download_years <= 0:
                 raise ValueError("download_years must be > 0")
