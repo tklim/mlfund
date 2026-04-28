@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""
+Manulife Fund Data Downloader
+Downloads NAV history and dividend data for specified fund codes from Manulife Investment Management Malaysia.
+"""
+
+import os
+import sys
+from datetime import datetime
+
+import pandas as pd
+import requests
+
+# Configuration
+BASE_URL = "https://www.manulifeim.com.my/funds/fund-details/_jcr_content/root/responsivegrid_641029165"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.102 Safari/537.36",
+    "Accept": "application/json",
+}
+OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def get_dividends(fund_id):
+    """Fetch dividend history for a fund."""
+    dividends_url = f"{BASE_URL}/funds.dividends.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
+    response = requests.get(dividends_url, headers=HEADERS).json()
+
+    # Handle list with data field - the API returns [ {"data": [...]} ]
+    if isinstance(response, list) and len(response) > 0:
+        response = response[0]
+
+    if isinstance(response, dict) and "data" in response:
+        return response["data"]
+    return response if isinstance(response, list) else []
+
+
+def download_fund(fund_id, years=3):
+    """Download NAV history and dividends for a fund."""
+    print(f"\n{'=' * 50}")
+    print(f"Downloading: {fund_id}")
+    print(f"{'=' * 50}")
+
+    # Get fund details
+    details_url = f"{BASE_URL}/funds.details.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
+    details = requests.get(details_url, headers=HEADERS).json()
+
+    # Get prices
+    prices_url = f"{BASE_URL}/funds.prices.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
+    prices = requests.get(prices_url, headers=HEADERS).json()
+
+    # Get dividends
+    dividends = get_dividends(fund_id)
+
+    fund_name = details.get("fundName", "Unknown Fund")
+    nav = details.get("nav", {})
+    current_price = nav.get("price")
+    current_date = nav.get("asOfDate")
+    change = nav.get("changePrice")
+    change_pct = nav.get("changePercent")
+
+    print(f"Fund: {fund_name}")
+    print(f"Current NAV: {current_price} MYR ({current_date})")
+    if change:
+        print(f"Daily Change: {change:.4f} ({change_pct:.2f}%)")
+    print(f"Dividend Records: {len(dividends)}")
+
+    # Build NAV dataframe
+    nav_data = []
+    for p in prices:
+        date = p.get("asOfDate")
+        price = p.get("price")
+        if date and price:
+            nav_data.append({"Date": date, "NAV": price})
+
+    df = pd.DataFrame(nav_data)
+    df = df.drop_duplicates(subset=["Date"], keep="last")
+    df = df.sort_values("Date")
+    df["Date"] = pd.to_datetime(df["Date"])
+
+    # Filter to specified years
+    cutoff = datetime.now() - pd.DateOffset(years=years)
+    df = df[df["Date"] >= cutoff]
+
+    # Prepare dividend data
+    div_list = []
+    for d in dividends:
+        div = d.get("dividend")
+        ex_date = d.get("exDividendDate")
+        if div and ex_date:
+            div_list.append({"Date": ex_date, "Dividend": div})
+
+    # Merge dividends
+    if div_list:
+        div_df = pd.DataFrame(div_list)
+        div_df["Date"] = pd.to_datetime(div_df["Date"])
+        df = df.merge(div_df, on="Date", how="left")
+        df["Dividend"] = df["Dividend"].fillna("")
+
+        # Calculate TotalReturn: NAV + cumulative dividends received
+        df["DividendAmount"] = df["Dividend"].replace("", 0).astype(float)
+        df["TotalReturn"] = df["NAV"] + df["DividendAmount"].cumsum()
+
+    print(f"NAV Records: {len(df)}")
+    print(
+        f"Date Range: {df['Date'].min().strftime('%Y-%m-%d')} to {df['Date'].max().strftime('%Y-%m-%d')}"
+    )
+
+    # Reorder columns
+    cols = ["Date", "NAV"]
+    if "Dividend" in df.columns:
+        cols.extend(["Dividend", "TotalReturn"])
+    df = df[cols]
+
+    # Save CSV (handle locked files)
+    base_file = f"manulife_{fund_id}_nav_{years}Y.csv"
+    out_path = os.path.join(OUTPUT_DIR, base_file)
+
+    if os.path.exists(out_path):
+        try:
+            with open(out_path, "a"):
+                pass
+        except IOError:
+            # File locked - use timestamp
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_path = os.path.join(
+                OUTPUT_DIR, f"manulife_{fund_id}_nav_{years}Y_{ts}.csv"
+            )
+
+    df.to_csv(out_path, index=False)
+    print(f"Saved: {out_path}")
+
+    return {
+        "fund_id": fund_id,
+        "fund_name": fund_name,
+        "current_nav": current_price,
+        "current_date": current_date,
+        "change": change,
+        "change_pct": change_pct,
+        "dividend_count": len(dividends),
+        "records": len(df),
+        "output_path": out_path,
+    }
+
+
+def get_fund_summary(fund_id):
+    """Get quick fund summary without full price history."""
+    details_url = f"{BASE_URL}/funds.details.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
+    details = requests.get(details_url, headers=HEADERS).json()
+
+    # Get latest dividend
+    dividends = get_dividends(fund_id)
+    latest_div = dividends[0] if dividends else None
+
+    fund_name = details.get("fundName", "Unknown")
+    nav = details.get("nav", {})
+    price = nav.get("price")
+    date = nav.get("asOfDate")
+    change = nav.get("changePrice")
+    change_pct = nav.get("changePercent")
+
+    return {
+        "fund_id": fund_id,
+        "fund_name": fund_name,
+        "nav": price,
+        "date": date,
+        "change": change,
+        "change_pct": change_pct,
+        "latest_dividend": latest_div.get("dividend") if latest_div else None,
+        "dividend_date": latest_div.get("exDividendDate") if latest_div else None,
+    }
+
+
+if __name__ == "__main__":
+    # Default tracked funds
+    TRACKED_FUNDS = ["MAKGCF", "MAPF"]
+
+    if len(sys.argv) == 1:
+        # No arguments - download default funds
+        print("Downloading default funds...")
+        results = []
+        for fid in TRACKED_FUNDS:
+            results.append(download_fund(fid))
+
+        print(f"\n{'=' * 50}")
+        print("SUMMARY")
+        print(f"{'=' * 50}")
+        for r in results:
+            print(f"{r['fund_id']}: {r['fund_name']}")
+            print(f"  NAV: {r['current_nav']} MYR ({r['current_date']})")
+            print(f"  Change: {r['change']:.4f} ({r['change_pct']:.2f}%)")
+            print(f"  Dividends: {r['dividend_count']}")
+            print(f"  Records: {r['records']}")
+
+    elif sys.argv[1] == "--all":
+        print(f"Downloading all tracked funds: {TRACKED_FUNDS}")
+        for fid in TRACKED_FUNDS:
+            download_fund(fid)
+
+    elif sys.argv[1] == "--summary":
+        print("Fund Summary:")
+        for fid in TRACKED_FUNDS:
+            s = get_fund_summary(fid)
+            div = (
+                f", Div: {s['latest_dividend']} ({s['dividend_date']})"
+                if s["latest_dividend"]
+                else ""
+            )
+            print(
+                f"{s['fund_id']}: {s['fund_name']} - {s['nav']} MYR ({s['date']}){div}"
+            )
+
+    else:
+        # Download specified fund(s)
+        for fid in sys.argv[1:]:
+            download_fund(fid)

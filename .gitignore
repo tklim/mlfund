@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Generated analysis outputs
+ga_tuning_summary_*.csv
+manulife_*_nav_*_20*.csv
+*-ga10-*.txt
+*-ga10-*.png
+
+# Local editor/system files
+.DS_Store
+Thumbs.db
