@@ -7,6 +7,7 @@ Downloads NAV history and dividend data for specified fund codes from Manulife I
 import os
 import re
 import sys
+import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,35 @@ HEADERS = {
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DATA_DIR = REPO_ROOT / "data"
+TRACKED_FUNDS = ["MAUS_RMH", "MGPRH", "MIIEH", "MAPF", "MGLVH", "MAKGCF", "HWFL", "MAPAC"]
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Download Manulife fund NAV and dividend history."
+    )
+    parser.add_argument(
+        "fund_ids",
+        nargs="*",
+        help="Fund code(s) to download, for example MAKGCF MAPF APCR.",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Download all tracked funds.",
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Show a quick summary without downloading price history.",
+    )
+    parser.add_argument(
+        "--years",
+        type=int,
+        default=3,
+        help="Number of years of NAV history to download (default: 3).",
+    )
+    return parser.parse_args()
 
 
 def sanitize_label(value):
@@ -38,6 +68,7 @@ def short_fund_label(fund_id, fund_name):
     short_name = re.sub(r"\bManulife\b", "", str(fund_name or ""), flags=re.IGNORECASE)
     short_name = re.sub(r"\bInvestment\b", "", short_name, flags=re.IGNORECASE)
     short_name = re.sub(r"\bFund\b", "", short_name, flags=re.IGNORECASE)
+    short_name = re.sub(r"Hedged\b", "H", short_name, flags=re.IGNORECASE)
     short_name = re.sub(r"\s+", " ", short_name).strip()
     return f"{fund_id}_{sanitize_label(short_name)}"
 
@@ -195,34 +226,14 @@ def get_fund_summary(fund_id):
 
 
 if __name__ == "__main__":
-    # Default tracked funds
-    TRACKED_FUNDS = ["MAKGCF", "MAPF"]
+    args = parse_args()
+    if args.years <= 0:
+        raise ValueError("--years must be greater than 0")
 
-    if len(sys.argv) == 1:
-        # No arguments - download default funds
-        print("Downloading default funds...")
-        results = []
-        for fid in TRACKED_FUNDS:
-            results.append(download_fund(fid))
-
-        print(f"\n{'=' * 50}")
-        print("SUMMARY")
-        print(f"{'=' * 50}")
-        for r in results:
-            print(f"{r['fund_id']}: {r['fund_name']}")
-            print(f"  NAV: {r['current_nav']} MYR ({r['current_date']})")
-            print(f"  Change: {r['change']:.4f} ({r['change_pct']:.2f}%)")
-            print(f"  Dividends: {r['dividend_count']}")
-            print(f"  Records: {r['records']}")
-
-    elif sys.argv[1] == "--all":
-        print(f"Downloading all tracked funds: {TRACKED_FUNDS}")
-        for fid in TRACKED_FUNDS:
-            download_fund(fid)
-
-    elif sys.argv[1] == "--summary":
+    if args.summary:
         print("Fund Summary:")
-        for fid in TRACKED_FUNDS:
+        summary_funds = args.fund_ids if args.fund_ids else TRACKED_FUNDS
+        for fid in summary_funds:
             s = get_fund_summary(fid)
             div = (
                 f", Div: {s['latest_dividend']} ({s['dividend_date']})"
@@ -232,8 +243,29 @@ if __name__ == "__main__":
             print(
                 f"{s['fund_id']}: {s['fund_name']} - {s['nav']} MYR ({s['date']}){div}"
             )
+        sys.exit(0)
 
+    if args.all:
+        funds_to_download = TRACKED_FUNDS
+        print(f"Downloading all tracked funds for {args.years}Y: {TRACKED_FUNDS}")
+    elif args.fund_ids:
+        funds_to_download = args.fund_ids
+        print(f"Downloading specified funds for {args.years}Y: {funds_to_download}")
     else:
-        # Download specified fund(s)
-        for fid in sys.argv[1:]:
-            download_fund(fid)
+        funds_to_download = TRACKED_FUNDS
+        print(f"Downloading default funds for {args.years}Y: {TRACKED_FUNDS}")
+
+    results = []
+    for fid in funds_to_download:
+        results.append(download_fund(fid, years=args.years))
+
+    if not args.fund_ids or args.all:
+        print(f"\n{'=' * 50}")
+        print("SUMMARY")
+        print(f"{'=' * 50}")
+        for r in results:
+            print(f"{r['fund_id']}: {r['fund_name']}")
+            print(f"  NAV: {r['current_nav']} MYR ({r['current_date']})")
+            print(f"  Change: {r['change']:.4f} ({r['change_pct']:.2f}%)")
+            print(f"  Dividends: {r['dividend_count']}")
+            print(f"  Records: {r['records']}")

@@ -24,14 +24,19 @@ pip install pandas requests pygad matplotlib numpy
 python scripts/download_fund.py MAKGCF
 ```
 
+### Download 5 Years of Data
+```bash
+python scripts/download_fund.py --all --years 5
+```
+
 ### Download Multiple Funds
 ```bash
-python scripts/download_fund.py MAKGCF MAPF APCR
+python scripts/download_fund.py MAKGCF MAPF APCR --years 5
 ```
 
 ### Download All Tracked Funds
 ```bash
-python scripts/download_fund.py --all
+python scripts/download_fund.py --all --years 5
 ```
 
 ### Quick Summary (No Download)
@@ -168,7 +173,7 @@ schtasks /create /tn "ManulifeFundDownload" /tr "python C:\Users\tklim\OpenWork\
 
 ## Notes
 
-- Data is fetched for the last **3 years** by default (modify `years` parameter in script)
+- Data is fetched for the last **3 years** by default; use `--years 5` to download 5 years
 - Dividend data is merged on ex-dividend dates
 - If CSV file is locked (open in Excel), script automatically adds timestamp to filename
 - All values in **MYR** (Malaysian Ringgit)
