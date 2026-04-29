@@ -65,6 +65,14 @@ python scripts/backtest-ema-ga10-index.py --pop_ranges 10 --gen_ranges 10 --ga-s
 python scripts/backtest-ema-ga10-index.py --data-file data/MAPF_Progress_nav_3Y.csv --pop_ranges 10 --gen_ranges 10 --ga-search-preset focused
 ```
 
+### Backtest 1Y Training Window, Repeated Every 6 Months
+
+Use `--lookback-years 1` and `--offset-months 6` to train GA on the previous 1 year of data, then roll forward and retune every 6 months:
+
+```bash
+python scripts/backtest-ema-ga10-index.py --data-file data/MAKGCF_GreaterChina_nav_3Y.csv --lookback-years 1 --offset-months 6 --pop_ranges 10 --gen_ranges 10 --ga-search-preset focused
+```
+
 ### Use a Different Price Column
 
 By default the script uses `TotalReturn`. If you want to test raw NAV instead:

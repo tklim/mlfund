@@ -15,6 +15,7 @@ import itertools  # For grid search over GA hyperparameters
 import argparse
 import signal
 import re
+import json
 
 try:
     import yfinance as yf
@@ -42,11 +43,35 @@ OUTPUTS_DIR = REPO_ROOT / "outputs"
 LOGS_DIR = OUTPUTS_DIR / "logs"
 CHARTS_DIR = OUTPUTS_DIR / "charts"
 TUNINGS_DIR = OUTPUTS_DIR / "tunings"
+RUN_HISTORY_FILE = TUNINGS_DIR / "backtest_run_history.csv"
+WINDOW_HISTORY_FILE = TUNINGS_DIR / "backtest_window_history.csv"
+TUNING_HISTORY_FILE = TUNINGS_DIR / "backtest_tuning_history.csv"
+TOP5_PARAMETERS_FILE = TUNINGS_DIR / "top5_parameter_sets_by_fund.csv"
 
 FUND_CODE_TO_SHORT_NAME = {
     "MAKGCF": "GreaterChina",
     "MAPF": "Progress",
     "APCR": "AsiaPacificREIT",
+}
+
+DEFAULT_STRATEGY_PARAMETERS = {
+    "use_rsi_filter": False,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "rsi_period": 14,
+    "use_trend_filter": False,
+    "trend_period": 100,
+    "use_stop_loss": True,
+    "stop_loss_pct": 5.0,
+    "use_take_profit": True,
+    "take_profit_pct": 10.0,
+    "cooldown_period": 3,
+    "dip_threshold_pct": 5.0,
+    "dip_lookback_days": 20,
+    "rebound_threshold_pct": 3.0,
+    "recovery_window_days": 10,
+    "drawdown_exit_pct": 3.0,
+    "reentry_rebound_pct": 2.0,
 }
 
 STRATEGY_PROFILE_SETTINGS = {
@@ -327,6 +352,205 @@ def build_deterministic_seed(*parts):
     """Create a stable 32-bit seed from run metadata."""
     seed_material = "|".join(str(part) for part in parts)
     return int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16)
+
+
+def json_default(value):
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    return str(value)
+
+
+def stable_hash(value, length=12):
+    encoded = json.dumps(value, sort_keys=True, default=json_default)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:length]
+
+
+def format_date(value):
+    if value is None or pd.isna(value):
+        return ""
+    return pd.Timestamp(value).strftime("%Y-%m-%d")
+
+
+def build_run_id(started_at_value, fund_label, config):
+    return f"{pd.Timestamp(started_at_value).strftime('%Y%m%d%H%M%S')}_{fund_label}_{stable_hash(config, 8)}"
+
+
+def build_param_set_id(row):
+    def normalize_param(value):
+        if isinstance(value, (float, np.floating)):
+            return round(float(value), 6)
+        return value
+
+    keys = [
+        "fund_label",
+        "price_column",
+        "lookback_years",
+        "offset_months",
+        "strategy_profile",
+        "short_ema",
+        "long_ema",
+        "stop_loss",
+        "cooldown",
+        "drawdown_exit_pct",
+        "reentry_rebound_pct",
+        "exposure_multiplier",
+    ]
+    return stable_hash({key: normalize_param(row.get(key)) for key in keys}, 16)
+
+
+def append_csv_rows(path, rows):
+    if not rows:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(rows)
+    df.to_csv(path, mode="a", index=False, header=not path.exists())
+
+
+def append_csv_row(path, row):
+    append_csv_rows(path, [row])
+
+
+def build_strategy_parameter_metadata(config, profile_settings):
+    params = dict(DEFAULT_STRATEGY_PARAMETERS)
+    params.update({
+        key: value
+        for key, value in (config or {}).items()
+        if key in params
+    })
+    return {
+        **params,
+        "execution_mode": profile_settings.get("execution_mode", "drawdown_reentry"),
+        "require_price_above_long_ema_for_reentry": profile_settings.get("require_price_above_long_ema_for_reentry", False),
+        "require_positive_long_slope_for_reentry": profile_settings.get("require_positive_long_slope_for_reentry", False),
+        "require_price_below_long_ema_for_exit": profile_settings.get("require_price_below_long_ema_for_exit", False),
+        "require_negative_long_slope_for_exit": profile_settings.get("require_negative_long_slope_for_exit", False),
+        "enable_partial_derisk": profile_settings.get("enable_partial_derisk", False),
+        "partial_exit_target_exposure": profile_settings.get("partial_exit_target_exposure", 0.5),
+        "always_invested": profile_settings.get("always_invested", False),
+        "disable_timing_exits": profile_settings.get("disable_timing_exits", False),
+        "disable_stop_loss": profile_settings.get("disable_stop_loss", False),
+        "disable_take_profit": profile_settings.get("disable_take_profit", False),
+    }
+
+
+def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, data_end,
+                       row_count, lookback_years_value, offset_months_value,
+                       initial_capital, backtest_start, backtest_end,
+                       strategy_profile_value, profile_override_preset_value,
+                       ga_seed_value, ga_search_preset_value,
+                       reuse_tuned_params_value, pop_ranges_value,
+                       gen_ranges_value, mutation_rates_value,
+                       crossover_rates_value):
+    return {
+        "run_id": run_id,
+        "fund_label": fund_label,
+        "data_file": str(csv_path),
+        "price_column": price_column,
+        "data_start": format_date(data_start),
+        "data_end": format_date(data_end),
+        "row_count": row_count,
+        "lookback_years": lookback_years_value,
+        "offset_months": offset_months_value,
+        "initial_capital": initial_capital,
+        "backtest_start": format_date(backtest_start),
+        "backtest_end": format_date(backtest_end),
+        "strategy_profile": strategy_profile_value,
+        "profile_override_preset": profile_override_preset_value,
+        "ga_seed": ga_seed_value if ga_seed_value is not None else "deterministic",
+        "ga_search_preset": ga_search_preset_value,
+        "reuse_tuned_params": reuse_tuned_params_value,
+        "pop_ranges": ",".join(str(value) for value in pop_ranges_value),
+        "gen_ranges": ",".join(str(value) for value in gen_ranges_value),
+        "mutation_rates": ",".join(str(value) for value in mutation_rates_value) if mutation_rates_value else "default grid",
+        "crossover_rates": ",".join(str(value) for value in crossover_rates_value) if crossover_rates_value else "default grid",
+        "run_started_at": started_at,
+    }
+
+
+def normalize_tuning_history_columns(df):
+    rename_map = {
+        "best_short_ema": "short_ema",
+        "best_long_ema": "long_ema",
+        "best_stop_loss_pct": "stop_loss",
+        "best_cooldown": "cooldown",
+        "best_drawdown_exit_pct": "drawdown_exit_pct",
+        "best_reentry_rebound_pct": "reentry_rebound_pct",
+        "best_exposure_multiplier": "exposure_multiplier",
+        "max_dd_pct": "max_drawdown_pct",
+    }
+    for old_name, new_name in rename_map.items():
+        if old_name in df.columns and new_name not in df.columns:
+            df[new_name] = df[old_name]
+    return df
+
+
+def refresh_top5_parameter_sets():
+    if not TUNING_HISTORY_FILE.exists():
+        return
+
+    history = pd.read_csv(TUNING_HISTORY_FILE)
+    if history.empty:
+        return
+    history = normalize_tuning_history_columns(history)
+
+    group_cols = [
+        "fund_label",
+        "price_column",
+        "lookback_years",
+        "offset_months",
+        "strategy_profile",
+        "short_ema",
+        "long_ema",
+        "stop_loss",
+        "cooldown",
+        "drawdown_exit_pct",
+        "reentry_rebound_pct",
+        "exposure_multiplier",
+    ]
+    missing_cols = [col for col in group_cols if col not in history.columns]
+    if missing_cols:
+        log_print(f"Skipping top-5 refresh; missing columns: {missing_cols}")
+        return
+
+    numeric_cols = [
+        "score",
+        "excess_return_pct",
+        "sharpe",
+        "max_drawdown_pct",
+        "trade_count",
+    ]
+    for col in numeric_cols:
+        if col in history.columns:
+            history[col] = pd.to_numeric(history[col], errors="coerce")
+    if "best" in history.columns:
+        history["best_flag"] = history["best"].astype(str).str.lower().isin(["true", "1", "yes"])
+    else:
+        history["best_flag"] = False
+
+    grouped = history.groupby(group_cols, dropna=False).agg(
+        times_tested=("score", "size"),
+        times_selected_best=("best_flag", "sum"),
+        avg_score=("score", "mean"),
+        median_score=("score", "median"),
+        avg_excess_return_pct=("excess_return_pct", "mean"),
+        avg_sharpe=("sharpe", "mean"),
+        avg_max_dd_pct=("max_drawdown_pct", "mean"),
+        avg_trade_count=("trade_count", "mean"),
+        most_recent_run_date=("run_started_at", "max"),
+    ).reset_index()
+
+    grouped["param_set_id"] = grouped.apply(lambda row: build_param_set_id(row.to_dict()), axis=1)
+    grouped = grouped.sort_values(
+        ["fund_label", "avg_score", "avg_excess_return_pct", "avg_sharpe", "avg_max_dd_pct", "times_selected_best"],
+        ascending=[True, False, False, False, True, False],
+    )
+    top5 = grouped.groupby("fund_label", group_keys=False).head(5)
+    top5.to_csv(TOP5_PARAMETERS_FILE, index=False)
 
 
 def sanitize_label(value):
@@ -1275,7 +1499,9 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=(3,10), long_ema_bounds=(80,30
                         drawdown_exit_bounds=(2.5,4.0), reentry_rebound_bounds=(1.0,3.0),
                         initial_capital=10000, strategy_profile_name="generic",
                         ga_seed_value=None, mutation_rates_value=None,
-                        crossover_rates_value=None, return_best_params=False):
+                        crossover_rates_value=None, return_best_params=False,
+                        run_metadata=None, window_metadata=None,
+                        strategy_parameter_metadata=None):
     """Grid search over GA hyperparameters for the index-specific objective."""
     log_print("\n=== GA HYPERPARAMETER TUNING PHASE ===")
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
@@ -1392,11 +1618,35 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=(3,10), long_ema_bounds=(80,30
         results_df = results_df.sort_values('score', ascending=False).reset_index(drop=True)
 
     results_df['best'] = results_df['score'] == results_df['score'].max()
+    metadata = {}
+    metadata.update(run_metadata or {})
+    metadata.update(window_metadata or {})
+    metadata.update(strategy_parameter_metadata or {})
+    if metadata:
+        for key, value in metadata.items():
+            results_df[key] = value
+
+    results_df["run_started_at"] = metadata.get("run_started_at", started_at)
+    results_df["tuning_recorded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    results_df["short_ema"] = results_df["best_short_ema"]
+    results_df["long_ema"] = results_df["best_long_ema"]
+    results_df["stop_loss"] = results_df["best_stop_loss_pct"]
+    results_df["cooldown"] = results_df["best_cooldown"]
+    results_df["stop_loss_pct"] = results_df["best_stop_loss_pct"]
+    results_df["cooldown_period"] = results_df["best_cooldown"]
+    results_df["drawdown_exit_pct"] = results_df["best_drawdown_exit_pct"]
+    results_df["reentry_rebound_pct"] = results_df["best_reentry_rebound_pct"]
+    results_df["exposure_multiplier"] = results_df["best_exposure_multiplier"]
+    results_df["max_drawdown_pct"] = results_df["max_dd_pct"]
+    results_df["param_set_id"] = results_df.apply(lambda row: build_param_set_id(row.to_dict()), axis=1)
+
     log_print("\nGA Hyperparameter Tuning Results:")
     log_print(results_df.to_string(index=False))
     tune_csv = f"ga_tuning_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     tune_csv = TUNINGS_DIR / tune_csv
     results_df.to_csv(tune_csv, index=False)
+    append_csv_rows(TUNING_HISTORY_FILE, results_df.to_dict("records"))
+    refresh_top5_parameter_sets()
     log_print(f"\nFull results saved to: {tune_csv}")
     log_print(f"Best combo (max score {best_score:.3f}): pop={best_combo[0]}, gens={best_combo[1]}, mut={best_combo[2]}, cross={best_combo[3]}")
 
@@ -1408,7 +1658,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                          pop_ranges_value, gen_ranges_value, initial_capital=10000,
                          strategy_profile_value="generic", ga_seed_value=None,
                          mutation_rates_value=None, crossover_rates_value=None,
-                         reuse_tuned_params_value=False, price_column_value="TotalReturn"):
+                         reuse_tuned_params_value=False, price_column_value="TotalReturn",
+                         ga_search_preset_value="grid", profile_override_preset_value="default"):
     """Run the full walk-forward GA backtest for a single CSV data source."""
     global log_file, csv_name, lookback_years, offset_months, pop_ranges
     global gen_ranges, mutation_rates, crossover_rates, reuse_tuned_params
@@ -1492,6 +1743,50 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         lookback_months = int(lookback_years * 12)
         start_date = df_clean.index.min() + pd.DateOffset(months=lookback_months)
         end_date = df_clean.index.max()
+        run_config_for_hash = {
+            "fund_label": csv_name,
+            "data_file": str(csv_path),
+            "price_column": price_col,
+            "lookback_years": lookback_years,
+            "offset_months": offset_months,
+            "strategy_profile": strategy_profile,
+            "profile_override_preset": profile_override_preset_value,
+            "ga_seed": ga_seed if ga_seed is not None else "deterministic",
+            "ga_search_preset": ga_search_preset_value,
+            "pop_ranges": pop_ranges,
+            "gen_ranges": gen_ranges,
+            "mutation_rates": mutation_rates or "default grid",
+            "crossover_rates": crossover_rates or "default grid",
+        }
+        run_id = build_run_id(started_at, csv_name, run_config_for_hash)
+        run_metadata = build_run_metadata(
+            run_id,
+            csv_path,
+            csv_name,
+            price_col,
+            df_clean.index.min(),
+            df_clean.index.max(),
+            len(df_clean),
+            lookback_years,
+            offset_months,
+            initial_capital,
+            start_date,
+            end_date,
+            strategy_profile,
+            profile_override_preset_value,
+            ga_seed,
+            ga_search_preset_value,
+            reuse_tuned_params,
+            pop_ranges,
+            gen_ranges,
+            mutation_rates,
+            crossover_rates,
+        )
+        strategy_parameter_metadata = build_strategy_parameter_metadata(
+            {},
+            get_strategy_profile_settings(strategy_profile),
+        )
+        log_print(f"Run ID: {run_id}")
 
         current_date = start_date
         portfolio_value = initial_capital
@@ -1503,6 +1798,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         all_trades = []
         best_ga_params = None
         carry_state = None
+        window_sequence = 0
 
         log_print(
             f"\nStarting ga10 walk-forward optimization from "
@@ -1511,8 +1807,17 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         )
 
         while current_date < end_date:
+            window_sequence += 1
             tuned_best_params = None
             lookback_start = current_date - pd.DateOffset(months=lookback_months)
+            next_period_end = current_date + pd.DateOffset(months=offset_months)
+            window_metadata = {
+                "window_sequence": window_sequence,
+                "train_start": format_date(lookback_start),
+                "train_end": format_date(current_date),
+                "test_start": format_date(current_date),
+                "test_end": format_date(min(next_period_end, end_date)),
+            }
             now = datetime.now()
             log_print(f"\nCurrent Date & Time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
             log_print(
@@ -1530,6 +1835,9 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     mutation_rates_value=mutation_rates,
                     crossover_rates_value=crossover_rates,
                     return_best_params=reuse_tuned_params,
+                    run_metadata=run_metadata,
+                    window_metadata=window_metadata,
+                    strategy_parameter_metadata=strategy_parameter_metadata,
                 )
                 tuned_best_params = None
                 if reuse_tuned_params:
@@ -1602,7 +1910,6 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 best_params.get('exposure_multiplier', 1.0)
             ))
 
-            next_period_end = current_date + pd.DateOffset(months=offset_months)
             next_period_data = df_clean[(df_clean.index >= current_date) & (df_clean.index < next_period_end)].copy()
 
             if len(next_period_data) == 0:
@@ -1629,6 +1936,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 'debug': True,
                 'strategy_profile_name': strategy_profile,
             }
+            period_initial_capital = portfolio_value
             df_result, total_return, num_trades, trades, period_win_rate, avg_return, decisions_df, _, _, carry_state = backtest_enhanced_dual_ema(
                 eval_data,
                 best_params['short_ema'],
@@ -1638,9 +1946,59 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 return_state=True,
                 **config
             )
+            period_metrics = calculate_index_strategy_metrics(
+                df_result,
+                trades,
+                period_initial_capital,
+                best_params['long_ema'],
+            )
             portfolio_value = df_result['Portfolio_Value'].iloc[-1]
             trade_count += num_trades
             all_trades.extend(trades)
+            window_row = {
+                **run_metadata,
+                **window_metadata,
+                **build_strategy_parameter_metadata(config, get_strategy_profile_settings(strategy_profile)),
+                "param_set_id": build_param_set_id({
+                    **run_metadata,
+                    "short_ema": best_params['short_ema'],
+                    "long_ema": best_params['long_ema'],
+                    "stop_loss": best_params['stop_loss'],
+                    "cooldown": best_params['cooldown'],
+                    "drawdown_exit_pct": best_params['drawdown_exit_pct'],
+                    "reentry_rebound_pct": best_params['reentry_rebound_pct'],
+                    "exposure_multiplier": best_params.get('exposure_multiplier', 1.0),
+                }),
+                "pop_size": pop_size,
+                "generations": generations,
+                "mutation_rate": mutation_rate,
+                "crossover_rate": crossover_rate,
+                "short_ema": best_params['short_ema'],
+                "long_ema": best_params['long_ema'],
+                "stop_loss": best_params['stop_loss'],
+                "cooldown": best_params['cooldown'],
+                "drawdown_exit_pct": best_params['drawdown_exit_pct'],
+                "reentry_rebound_pct": best_params['reentry_rebound_pct'],
+                "exposure_multiplier": best_params.get('exposure_multiplier', 1.0),
+                "effective_cooldown": best_params['effective_cooldown'],
+                "effective_drawdown_exit_pct": best_params['effective_drawdown_exit_pct'],
+                "effective_reentry_rebound_pct": best_params['effective_reentry_rebound_pct'],
+                "period_initial_capital": period_initial_capital,
+                "period_final_value": portfolio_value,
+                "period_return_pct": period_metrics['adaptive_return'],
+                "period_buy_hold_return_pct": period_metrics['buy_hold_return'],
+                "period_excess_return_pct": period_metrics['excess_return'],
+                "period_sharpe": period_metrics['sharpe'],
+                "period_max_dd_pct": period_metrics['max_dd'],
+                "period_trade_count": num_trades,
+                "period_win_rate_pct": period_win_rate,
+                "period_time_invested_pct": period_metrics['time_invested_pct'],
+                "period_uptrend_cash_pct": period_metrics['uptrend_cash_pct'],
+                "period_missed_upside_after_exit_pct": period_metrics['missed_upside_after_exit_pct'],
+                "period_stop_loss_count": period_metrics['stop_loss_count'],
+                "recorded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            append_csv_row(WINDOW_HISTORY_FILE, window_row)
             portfolio_history.append(
                 df_result[['Date', 'Portfolio_Value', 'Position', 'Exposure']].copy()
                 if 'Date' in df_result.columns
@@ -1821,6 +2179,53 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         plt.close()
         log_print(f"\nChart saved to: {png_file}")
 
+        profile_settings = get_strategy_profile_settings(strategy_profile)
+        run_score = (
+            (2.0 * summary_metrics['excess_return'])
+            + (6.0 * summary_metrics['sharpe'])
+            - (0.30 * summary_metrics['max_dd'])
+            - (0.10 * trade_count)
+            - (0.5 * summary_metrics['uptrend_cash_pct'])
+            - (
+                profile_settings['missed_upside_after_exit_weight']
+                * summary_metrics['missed_upside_after_exit_pct']
+            )
+        )
+        last_params = params_history[-1] if params_history else None
+        run_row = {
+            **run_metadata,
+            "run_completed_at": completed_at,
+            "duration": str(duration),
+            "log_file": str(log_filename),
+            "chart_file": str(png_file),
+            "final_portfolio_value": portfolio_value,
+            "adaptive_return_pct": summary_metrics['adaptive_return'],
+            "buy_hold_return_pct": summary_metrics['buy_hold_return'],
+            "excess_return_pct": summary_metrics['excess_return'],
+            "sharpe": summary_metrics['sharpe'],
+            "max_dd_pct": summary_metrics['max_dd'],
+            "trade_count": trade_count,
+            "win_rate_pct": overall_win_rate,
+            "time_invested_pct": summary_metrics['time_invested_pct'],
+            "uptrend_cash_pct": summary_metrics['uptrend_cash_pct'],
+            "missed_upside_after_exit_pct": summary_metrics['missed_upside_after_exit_pct'],
+            "stop_loss_count": summary_metrics['stop_loss_count'],
+            "score": run_score,
+            "best_ga_pop_size": best_ga_params[0] if best_ga_params else "",
+            "best_ga_generations": best_ga_params[1] if best_ga_params else "",
+            "best_ga_mutation_rate": best_ga_params[2] if best_ga_params else "",
+            "best_ga_crossover_rate": best_ga_params[3] if best_ga_params else "",
+            "last_short_ema": last_params[1] if last_params else "",
+            "last_long_ema": last_params[2] if last_params else "",
+            "last_stop_loss": last_params[3] if last_params else "",
+            "last_cooldown": last_params[4] if last_params else "",
+            "last_drawdown_exit_pct": last_params[5] if last_params else "",
+            "last_reentry_rebound_pct": last_params[6] if last_params else "",
+            "last_exposure_multiplier": last_params[7] if last_params else "",
+        }
+        append_csv_row(RUN_HISTORY_FILE, run_row)
+        refresh_top5_parameter_sets()
+
         log_print("\n=== COMPLETED ===")
 
         if log_file:
@@ -1914,4 +2319,6 @@ if __name__ == "__main__":
             crossover_rates_value=crossover_rates,
             reuse_tuned_params_value=reuse_tuned_params,
             price_column_value=args.price_column,
+            ga_search_preset_value=args.ga_search_preset,
+            profile_override_preset_value=args.profile_override_preset,
         )

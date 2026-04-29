@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from requests import RequestException
 
 # Configuration
 BASE_URL = "https://www.manulifeim.com.my/funds/fund-details/_jcr_content/root/responsivegrid_641029165"
@@ -76,7 +77,13 @@ def short_fund_label(fund_id, fund_name):
 def get_dividends(fund_id):
     """Fetch dividend history for a fund."""
     dividends_url = f"{BASE_URL}/funds.dividends.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
-    response = requests.get(dividends_url, headers=HEADERS).json()
+    try:
+        response = requests.get(dividends_url, headers=HEADERS, timeout=30)
+        response.raise_for_status()
+        response = response.json()
+    except (RequestException, ValueError) as exc:
+        print(f"Warning: unable to load dividend history for {fund_id}: {exc}")
+        return []
 
     # Handle list with data field - the API returns [ {"data": [...]} ]
     if isinstance(response, list) and len(response) > 0:
