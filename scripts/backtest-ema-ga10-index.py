@@ -16,6 +16,9 @@ import argparse
 import signal
 import re
 import json
+import platform
+import socket
+import time
 
 try:
     import yfinance as yf
@@ -47,6 +50,14 @@ RUN_HISTORY_FILE = TUNINGS_DIR / "backtest_run_history.csv"
 WINDOW_HISTORY_FILE = TUNINGS_DIR / "backtest_window_history.csv"
 TUNING_HISTORY_FILE = TUNINGS_DIR / "backtest_tuning_history.csv"
 TOP5_PARAMETERS_FILE = TUNINGS_DIR / "top5_parameter_sets_by_fund.csv"
+DEFAULT_SHORT_EMA_BOUNDS = (2, 60)
+DEFAULT_LONG_EMA_BOUNDS = (30, 300)
+DEFAULT_RSI_OVERSOLD_BOUNDS = (10, 40)
+DEFAULT_RSI_OVERBOUGHT_BOUNDS = (60, 90)
+DEFAULT_RSI_PERIOD = 14
+LOCK_RETRY_SCHEDULE_SECONDS = [30, 60, 120]
+history_fallback_files = []
+skip_top5_refresh_for_run = False
 
 FUND_CODE_TO_SHORT_NAME = {
     "MAKGCF": "GreaterChina",
@@ -56,9 +67,9 @@ FUND_CODE_TO_SHORT_NAME = {
 
 DEFAULT_STRATEGY_PARAMETERS = {
     "use_rsi_filter": False,
-    "rsi_oversold": 30,
-    "rsi_overbought": 70,
-    "rsi_period": 14,
+    "rsi_oversold": 29,
+    "rsi_overbought": 71,
+    "rsi_period": DEFAULT_RSI_PERIOD,
     "use_trend_filter": False,
     "trend_period": 100,
     "use_stop_loss": True,
@@ -221,6 +232,22 @@ def parse_args():
         type=str,
         default=None,
         help="GA Generation size (default: 10)"
+    )
+    parser.add_argument(
+        "--short-ema-bounds",
+        nargs=2,
+        type=int,
+        default=list(DEFAULT_SHORT_EMA_BOUNDS),
+        metavar=("MIN", "MAX"),
+        help="Short EMA integer bounds for GA search (default: 2 60)"
+    )
+    parser.add_argument(
+        "--long-ema-bounds",
+        nargs=2,
+        type=int,
+        default=list(DEFAULT_LONG_EMA_BOUNDS),
+        metavar=("MIN", "MAX"),
+        help="Long EMA integer bounds for GA search (default: 30 300)"
     )
     parser.add_argument(
         "--symbols",
@@ -397,22 +424,151 @@ def build_param_set_id(row):
         "cooldown",
         "drawdown_exit_pct",
         "reentry_rebound_pct",
+        "rsi_oversold",
+        "rsi_overbought",
         "exposure_multiplier",
     ]
     return stable_hash({key: normalize_param(row.get(key)) for key in keys}, 16)
 
 
-def append_csv_rows(path, rows):
+def safe_log(message):
+    print(message)
+    global log_file
+    if log_file:
+        try:
+            log_file.write(message + '\n')
+            log_file.flush()
+        except Exception:
+            pass
+
+
+def build_lock_fallback_path(path):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return path.with_name(f"{path.stem}_{timestamp}{path.suffix}")
+
+
+def record_history_fallback(original_path, fallback_path):
+    global history_fallback_files
+    entry = f"{original_path} -> {fallback_path}"
+    if entry not in history_fallback_files:
+        history_fallback_files.append(entry)
+
+
+def run_with_lock_resilience(path, writer, purpose):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    last_error = None
+
+    for attempt_index, wait_seconds in enumerate(LOCK_RETRY_SCHEDULE_SECONDS, start=1):
+        try:
+            writer(path)
+            return {
+                "path": str(path),
+                "used_fallback": False,
+                "locked": False,
+            }
+        except PermissionError as exc:
+            last_error = exc
+            safe_log(
+                f"{purpose} locked: {path}. "
+                f"Retry {attempt_index}/{len(LOCK_RETRY_SCHEDULE_SECONDS)} in {wait_seconds}s."
+            )
+            time.sleep(wait_seconds)
+
+    try:
+        writer(path)
+        return {
+            "path": str(path),
+            "used_fallback": False,
+            "locked": False,
+        }
+    except PermissionError as exc:
+        last_error = exc
+
+    fallback_path = build_lock_fallback_path(path)
+    safe_log(
+        f"{purpose} still locked after retries: {path}. "
+        f"Writing fallback file instead: {fallback_path}"
+    )
+    writer(fallback_path)
+    record_history_fallback(path, fallback_path)
+    return {
+        "path": str(fallback_path),
+        "used_fallback": True,
+        "locked": True,
+        "error": str(last_error) if last_error else "",
+    }
+
+
+def append_csv_rows_to_path(path, rows):
     if not rows:
         return
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
-    df.to_csv(path, mode="a", index=False, header=not path.exists())
+    if not path.exists():
+        df.to_csv(path, index=False)
+        return
+
+    try:
+        existing_cols = pd.read_csv(path, nrows=0).columns.tolist()
+    except pd.errors.EmptyDataError:
+        df.to_csv(path, index=False)
+        return
+
+    all_cols = existing_cols + [col for col in df.columns if col not in existing_cols]
+    if len(all_cols) > len(existing_cols):
+        existing_df = pd.read_csv(path)
+        for col in all_cols:
+            if col not in existing_df.columns:
+                existing_df[col] = ""
+        for col in all_cols:
+            if col not in df.columns:
+                df[col] = ""
+        pd.concat(
+            [existing_df[all_cols], df[all_cols]],
+            ignore_index=True,
+        ).to_csv(path, index=False)
+        return
+
+    df.reindex(columns=existing_cols).to_csv(path, mode="a", index=False, header=False)
+
+
+def append_csv_rows(path, rows):
+    if not rows:
+        return {
+            "path": str(path),
+            "used_fallback": False,
+            "locked": False,
+        }
+
+    result = run_with_lock_resilience(
+        path,
+        lambda target_path: append_csv_rows_to_path(target_path, rows),
+        purpose="History CSV append",
+    )
+
+    global skip_top5_refresh_for_run
+    if Path(path) == TUNING_HISTORY_FILE and result.get("used_fallback"):
+        skip_top5_refresh_for_run = True
+        safe_log(
+            f"Top-5 refresh will be skipped for this run because the main tuning history file was unavailable. "
+            f"Fallback history file: {result['path']}"
+        )
+
+    return result
 
 
 def append_csv_row(path, row):
     append_csv_rows(path, [row])
+
+
+def write_csv_with_lock_resilience(df, path, index=False, purpose="History CSV write"):
+    return run_with_lock_resilience(
+        path,
+        lambda target_path: df.to_csv(target_path, index=index),
+        purpose=purpose,
+    )
 
 
 def build_strategy_parameter_metadata(config, profile_settings):
@@ -438,6 +594,18 @@ def build_strategy_parameter_metadata(config, profile_settings):
     }
 
 
+def get_machine_metadata():
+    """Capture the runner identity so results can be compared across machines."""
+    hostname = socket.gethostname()
+    machine_name = os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or hostname
+    return {
+        "machine_name": machine_name,
+        "hostname": hostname,
+        "platform": platform.platform(),
+        "python_version": platform.python_version(),
+    }
+
+
 def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, data_end,
                        row_count, lookback_years_value, offset_months_value,
                        initial_capital, backtest_start, backtest_end,
@@ -445,9 +613,12 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
                        ga_seed_value, ga_search_preset_value,
                        reuse_tuned_params_value, pop_ranges_value,
                        gen_ranges_value, mutation_rates_value,
-                       crossover_rates_value):
+                       crossover_rates_value, short_ema_bounds_value,
+                       long_ema_bounds_value, machine_metadata=None):
+    machine_metadata = machine_metadata or get_machine_metadata()
     return {
         "run_id": run_id,
+        **machine_metadata,
         "fund_label": fund_label,
         "data_file": str(csv_path),
         "price_column": price_column,
@@ -466,6 +637,10 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
         "reuse_tuned_params": reuse_tuned_params_value,
         "pop_ranges": ",".join(str(value) for value in pop_ranges_value),
         "gen_ranges": ",".join(str(value) for value in gen_ranges_value),
+        "short_ema_min": short_ema_bounds_value[0],
+        "short_ema_max": short_ema_bounds_value[1],
+        "long_ema_min": long_ema_bounds_value[0],
+        "long_ema_max": long_ema_bounds_value[1],
         "mutation_rates": ",".join(str(value) for value in mutation_rates_value) if mutation_rates_value else "default grid",
         "crossover_rates": ",".join(str(value) for value in crossover_rates_value) if crossover_rates_value else "default grid",
         "run_started_at": started_at,
@@ -480,20 +655,40 @@ def normalize_tuning_history_columns(df):
         "best_cooldown": "cooldown",
         "best_drawdown_exit_pct": "drawdown_exit_pct",
         "best_reentry_rebound_pct": "reentry_rebound_pct",
+        "best_rsi_oversold": "rsi_oversold",
+        "best_rsi_overbought": "rsi_overbought",
         "best_exposure_multiplier": "exposure_multiplier",
         "max_dd_pct": "max_drawdown_pct",
     }
     for old_name, new_name in rename_map.items():
         if old_name in df.columns and new_name not in df.columns:
             df[new_name] = df[old_name]
+    if "rsi_oversold" not in df.columns:
+        df["rsi_oversold"] = DEFAULT_STRATEGY_PARAMETERS["rsi_oversold"]
+    if "rsi_overbought" not in df.columns:
+        df["rsi_overbought"] = DEFAULT_STRATEGY_PARAMETERS["rsi_overbought"]
+    if "rsi_period" not in df.columns:
+        df["rsi_period"] = DEFAULT_RSI_PERIOD
     return df
 
 
 def refresh_top5_parameter_sets():
+    global skip_top5_refresh_for_run
+    if skip_top5_refresh_for_run:
+        safe_log(
+            "Skipping top-5 refresh because the main tuning history file was not updated during this run."
+        )
+        return
     if not TUNING_HISTORY_FILE.exists():
         return
 
-    history = pd.read_csv(TUNING_HISTORY_FILE)
+    try:
+        history = pd.read_csv(TUNING_HISTORY_FILE)
+    except PermissionError:
+        safe_log(
+            f"Skipping top-5 refresh because tuning history is locked: {TUNING_HISTORY_FILE}"
+        )
+        return
     if history.empty:
         return
     history = normalize_tuning_history_columns(history)
@@ -510,6 +705,8 @@ def refresh_top5_parameter_sets():
         "cooldown",
         "drawdown_exit_pct",
         "reentry_rebound_pct",
+        "rsi_oversold",
+        "rsi_overbought",
         "exposure_multiplier",
     ]
     missing_cols = [col for col in group_cols if col not in history.columns]
@@ -550,7 +747,12 @@ def refresh_top5_parameter_sets():
         ascending=[True, False, False, False, True, False],
     )
     top5 = grouped.groupby("fund_label", group_keys=False).head(5)
-    top5.to_csv(TOP5_PARAMETERS_FILE, index=False)
+    write_csv_with_lock_resilience(
+        top5,
+        TOP5_PARAMETERS_FILE,
+        index=False,
+        purpose="Top-5 parameter summary write",
+    )
 
 
 def sanitize_label(value):
@@ -662,6 +864,24 @@ def normalize_float_ranges(value, default=None):
     if isinstance(value, str):
         return [float(x.strip()) for x in value.split(",") if x.strip()]
     raise ValueError("Invalid float range input")
+
+
+def normalize_ema_bounds(value, label, minimum=1):
+    if value is None or len(value) != 2:
+        raise ValueError(f"{label} requires exactly two values: MIN MAX")
+    lower, upper = int(value[0]), int(value[1])
+    if lower < minimum:
+        raise ValueError(f"{label} minimum must be >= {minimum}")
+    if lower > upper:
+        raise ValueError(f"{label} minimum must be <= maximum")
+    return (lower, upper)
+
+
+def validate_ema_bounds(short_bounds, long_bounds):
+    if long_bounds[1] <= short_bounds[0]:
+        raise ValueError("long EMA maximum must be greater than short EMA minimum")
+    return short_bounds, long_bounds
+
 
 def log_print(message):
     """Print to console and write to log file"""
@@ -869,13 +1089,21 @@ def backtest_enhanced_dual_ema(df, short_ema, long_ema, initial_capital=10000,
     df.loc[df['Sell_Regime_OK'], 'Final_Signal'] = -1
     df.loc[df['Recovery_Buy_Override'], 'Final_Signal'] = 1
     df['RSI_Filter_Block'] = False
+    df['RSI_Sell_Block'] = False
+    df['RSI_Buy_Block'] = False
     df['Trend_Filter_Block'] = False
 
-    # RSI is only used to suppress sells during oversold conditions.
+    # RSI guards exits during oversold dips and entries during overbought spikes.
     if use_rsi_filter:
         rsi_sell_block = df['Sell_Regime_OK'] & (df['RSI'] < rsi_oversold)
         df.loc[rsi_sell_block, 'Final_Signal'] = 0
         df.loc[rsi_sell_block, 'RSI_Filter_Block'] = True
+        df.loc[rsi_sell_block, 'RSI_Sell_Block'] = True
+
+        rsi_buy_block = (df['Final_Signal'] > 0) & (df['RSI'] > rsi_overbought)
+        df.loc[rsi_buy_block, 'Final_Signal'] = 0
+        df.loc[rsi_buy_block, 'RSI_Filter_Block'] = True
+        df.loc[rsi_buy_block, 'RSI_Buy_Block'] = True
 
     if use_trend_filter:
         trend_buy_block = (df['EMA_Signal'] == 1) & (df['NAV'] < df[f'Trend_EMA_{trend_period}'])
@@ -1005,8 +1233,12 @@ def backtest_enhanced_dual_ema(df, short_ema, long_ema, initial_capital=10000,
                 reentry_conditions_met = reentry_conditions_met and df['Long_EMA_Slope_5'].iloc[i] >= 0
             if always_invested and cash > 0:
                 reentry_conditions_met = True
+            rsi_entry_blocked = use_rsi_filter and rsi_val > rsi_overbought
+            if rsi_entry_blocked and reentry_conditions_met:
+                reentry_conditions_met = False
+                entry_blocked_reason = f"RSI_OVERBOUGHT ({rsi_val:.1f} > {rsi_overbought})"
 
-            if i == trade_start_idx and start_invested and cash > 0 and cooldown_counter == 0:
+            if i == trade_start_idx and start_invested and cash > 0 and cooldown_counter == 0 and not rsi_entry_blocked:
                 entry_value = set_target_exposure(current_price, exposure_multiplier)
                 trades.append(('BUY', trade_marker, current_price, entry_value))
 
@@ -1035,6 +1267,8 @@ def backtest_enhanced_dual_ema(df, short_ema, long_ema, initial_capital=10000,
                     else:
                         log_print(f"     Rebound From Low: {rebound_from_low_pct:.2f}% | Threshold: {reentry_threshold:.2f}%")
                     log_print("")
+            elif rsi_entry_blocked and position < 1 and cash > 0:
+                entry_blocked_reason = entry_blocked_reason or f"RSI_OVERBOUGHT ({rsi_val:.1f} > {rsi_overbought})"
             elif reentry_conditions_met and cooldown_counter > 0 and position <= 0:
                 entry_blocked_reason = f"COOLDOWN ({cooldown_counter} periods remaining)"
             else:
@@ -1169,7 +1403,7 @@ def backtest_enhanced_dual_ema(df, short_ema, long_ema, initial_capital=10000,
 def buy_and_hold_strategy(df, initial_capital=10000):
     """Calculate buy and hold returns"""
     if len(df) == 0:
-        return pd.Series([initial_capital]), 0
+        return pd.Series(dtype=float), 0
     start_price = df['NAV'].iloc[0]
     end_price = df['NAV'].iloc[-1]
     shares = initial_capital / start_price
@@ -1324,7 +1558,7 @@ def calculate_missed_upside_after_exits(df_result, trades):
     return missed_upside
 
 ###########################################################
-def genetic_optimize_params(df, short_ema_bounds=(3, 10), long_ema_bounds=(80, 300),
+def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_ema_bounds=DEFAULT_LONG_EMA_BOUNDS,
                            sl_bounds=(8, 15), cd_bounds=(0, 3),
                            drawdown_exit_bounds=(2.5, 4.0), reentry_rebound_bounds=(1.0, 3.0),
                            pop_size=50, generations=50, mutation_rate=0.1, crossover_rate=0.7,
@@ -1349,7 +1583,9 @@ def genetic_optimize_params(df, short_ema_bounds=(3, 10), long_ema_bounds=(80, 3
         {'low': sl_bounds[0], 'high': sl_bounds[1]},
         {'low': cd_bounds[0], 'high': cd_bounds[1] + 1, 'step': 1},
         {'low': drawdown_exit_bounds[0], 'high': drawdown_exit_bounds[1]},
-        {'low': reentry_rebound_bounds[0], 'high': reentry_rebound_bounds[1]}
+        {'low': reentry_rebound_bounds[0], 'high': reentry_rebound_bounds[1]},
+        {'low': DEFAULT_RSI_OVERSOLD_BOUNDS[0], 'high': DEFAULT_RSI_OVERSOLD_BOUNDS[1] + 1, 'step': 1},
+        {'low': DEFAULT_RSI_OVERBOUGHT_BOUNDS[0], 'high': DEFAULT_RSI_OVERBOUGHT_BOUNDS[1] + 1, 'step': 1},
     ]
     exposure_bounds = get_exposure_bounds(strategy_profile_name)
     uses_exposure_gene = exposure_bounds[1] > exposure_bounds[0]
@@ -1358,13 +1594,15 @@ def genetic_optimize_params(df, short_ema_bounds=(3, 10), long_ema_bounds=(80, 3
     num_genes = len(gene_space)
 
     def fitness_func(ga_instance, solution, solution_idx):
-        short_ema, long_ema, sl, cd, drawdown_exit_pct, reentry_rebound_pct = solution[:6]
-        exposure_multiplier = float(solution[6]) if uses_exposure_gene else profile_settings.get("default_exposure_multiplier", 1.0)
+        short_ema, long_ema, sl, cd, drawdown_exit_pct, reentry_rebound_pct, rsi_oversold, rsi_overbought = solution[:8]
+        exposure_multiplier = float(solution[8]) if uses_exposure_gene else profile_settings.get("default_exposure_multiplier", 1.0)
         short_ema = int(short_ema)
         long_ema = int(long_ema)
         cd = int(cd)
+        rsi_oversold = int(rsi_oversold)
+        rsi_overbought = int(rsi_overbought)
 
-        if short_ema >= long_ema or (long_ema - short_ema) < 40:
+        if short_ema >= long_ema or (long_ema - short_ema) < 40 or rsi_oversold >= rsi_overbought:
             return -np.inf
 
         split_idx = int(len(df) * 0.8)
@@ -1376,7 +1614,8 @@ def genetic_optimize_params(df, short_ema_bounds=(3, 10), long_ema_bounds=(80, 3
         else:
             train_result, _, _, train_trades, _, _, _, _, _ = backtest_enhanced_dual_ema(
                 df_train, short_ema, long_ema, initial_capital,
-                use_rsi_filter=False,
+                use_rsi_filter=True, rsi_oversold=rsi_oversold,
+                rsi_overbought=rsi_overbought, rsi_period=DEFAULT_RSI_PERIOD,
                 use_stop_loss=True, stop_loss_pct=sl, use_take_profit=False,
                 cooldown_period=cd, drawdown_exit_pct=drawdown_exit_pct,
                 reentry_rebound_pct=reentry_rebound_pct, start_invested=True, debug=False,
@@ -1385,7 +1624,8 @@ def genetic_optimize_params(df, short_ema_bounds=(3, 10), long_ema_bounds=(80, 3
             )
             test_result, _, _, test_trades, _, _, _, _, _ = backtest_enhanced_dual_ema(
                 df_test, short_ema, long_ema, initial_capital,
-                use_rsi_filter=False,
+                use_rsi_filter=True, rsi_oversold=rsi_oversold,
+                rsi_overbought=rsi_overbought, rsi_period=DEFAULT_RSI_PERIOD,
                 use_stop_loss=True, stop_loss_pct=sl, use_take_profit=False,
                 cooldown_period=cd, drawdown_exit_pct=drawdown_exit_pct,
                 reentry_rebound_pct=reentry_rebound_pct, start_invested=True, debug=False,
@@ -1399,7 +1639,8 @@ def genetic_optimize_params(df, short_ema_bounds=(3, 10), long_ema_bounds=(80, 3
 
         df_result, _, num_trades, trades, _, _, _, _, _ = backtest_enhanced_dual_ema(
             df, short_ema, long_ema, initial_capital,
-            use_rsi_filter=False,
+            use_rsi_filter=True, rsi_oversold=rsi_oversold,
+            rsi_overbought=rsi_overbought, rsi_period=DEFAULT_RSI_PERIOD,
             use_stop_loss=True, stop_loss_pct=sl, use_take_profit=False,
             cooldown_period=cd, drawdown_exit_pct=drawdown_exit_pct,
             reentry_rebound_pct=reentry_rebound_pct, start_invested=True, debug=False,
@@ -1476,7 +1717,11 @@ def genetic_optimize_params(df, short_ema_bounds=(3, 10), long_ema_bounds=(80, 3
             'cooldown': int(solution[3]),
             'drawdown_exit_pct': solution[4],
             'reentry_rebound_pct': solution[5],
-            'exposure_multiplier': float(solution[6]) if uses_exposure_gene else profile_settings.get("default_exposure_multiplier", 1.0),
+            'use_rsi_filter': True,
+            'rsi_oversold': int(solution[6]),
+            'rsi_overbought': int(solution[7]),
+            'rsi_period': DEFAULT_RSI_PERIOD,
+            'exposure_multiplier': float(solution[8]) if uses_exposure_gene else profile_settings.get("default_exposure_multiplier", 1.0),
             'effective_cooldown': int(solution[3]) + profile_settings['cooldown_extra_periods'],
             'effective_drawdown_exit_pct': solution[4] * profile_settings['drawdown_exit_multiplier'],
             'effective_reentry_rebound_pct': solution[5] * profile_settings['reentry_rebound_multiplier'],
@@ -1485,6 +1730,7 @@ def genetic_optimize_params(df, short_ema_bounds=(3, 10), long_ema_bounds=(80, 3
             f"Best : EMA({best_params['short_ema']}, {best_params['long_ema']}), "
             f"SL={best_params['stop_loss']:.2f}, CD={best_params['cooldown']}, "
             f"DDX={best_params['drawdown_exit_pct']:.2f}, RBR={best_params['reentry_rebound_pct']:.2f}, "
+            f"RSI={best_params['rsi_oversold']}/{best_params['rsi_overbought']}, "
             f"EXP={best_params['exposure_multiplier']:.2f}x"
         )
         return best_params
@@ -1493,8 +1739,8 @@ def genetic_optimize_params(df, short_ema_bounds=(3, 10), long_ema_bounds=(80, 3
         return None
 
 
-# Hyperparameter Tuning Function (unchanged from prior fix)
-def tune_ga_hyperparams(df_tune, short_ema_bounds=(3,10), long_ema_bounds=(80,300),
+# Hyperparameter Tuning Function
+def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_ema_bounds=DEFAULT_LONG_EMA_BOUNDS,
                         sl_bounds=(8,15), cd_bounds=(0,3),
                         drawdown_exit_bounds=(2.5,4.0), reentry_rebound_bounds=(1.0,3.0),
                         initial_capital=10000, strategy_profile_name="generic",
@@ -1518,7 +1764,9 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=(3,10), long_ema_bounds=(80,30
         "Profile gene bounds: "
         f"EMA short={short_ema_bounds}, EMA long={long_ema_bounds}, "
         f"SL={sl_bounds}, CD={cd_bounds}, DDX={drawdown_exit_bounds}, "
-        f"RBR={reentry_rebound_bounds}, EXP={get_exposure_bounds(strategy_profile_name)}"
+        f"RBR={reentry_rebound_bounds}, "
+        f"RSI={DEFAULT_RSI_OVERSOLD_BOUNDS}/{DEFAULT_RSI_OVERBOUGHT_BOUNDS}, "
+        f"EXP={get_exposure_bounds(strategy_profile_name)}"
     )
     mut_ranges = mutation_rates_value if mutation_rates_value else [0.01, 0.05, 0.1, 0.15]
     cross_ranges = crossover_rates_value if crossover_rates_value else [0.6, 0.7, 0.8, 0.9]
@@ -1545,7 +1793,10 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=(3,10), long_ema_bounds=(80,30
 
         df_result, _, num_trades, trades, win_rate, _, _, _, _ = backtest_enhanced_dual_ema(
             df_tune, best_params['short_ema'], best_params['long_ema'], initial_capital,
-            use_rsi_filter=False,
+            use_rsi_filter=True,
+            rsi_oversold=best_params['rsi_oversold'],
+            rsi_overbought=best_params['rsi_overbought'],
+            rsi_period=best_params.get('rsi_period', DEFAULT_RSI_PERIOD),
             use_stop_loss=True, stop_loss_pct=best_params['stop_loss'], use_take_profit=False,
             cooldown_period=best_params['cooldown'],
             drawdown_exit_pct=best_params['drawdown_exit_pct'],
@@ -1576,6 +1827,10 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=(3,10), long_ema_bounds=(80,30
             'best_cooldown': best_params['cooldown'],
             'best_drawdown_exit_pct': best_params['drawdown_exit_pct'],
             'best_reentry_rebound_pct': best_params['reentry_rebound_pct'],
+            'best_rsi_oversold': best_params['rsi_oversold'],
+            'best_rsi_overbought': best_params['rsi_overbought'],
+            'use_rsi_filter': best_params.get('use_rsi_filter', True),
+            'rsi_period': best_params.get('rsi_period', DEFAULT_RSI_PERIOD),
             'best_exposure_multiplier': best_params.get('exposure_multiplier', profile_settings.get("default_exposure_multiplier", 1.0)),
             'effective_cooldown': best_params['effective_cooldown'],
             'effective_drawdown_exit_pct': best_params['effective_drawdown_exit_pct'],
@@ -1603,6 +1858,10 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=(3,10), long_ema_bounds=(80,30
             'pop_size': 10, 'generations': 10, 'mutation_rate': 0.05, 'crossover_rate': 0.7,
             'best_short_ema': 0, 'best_long_ema': 0, 'best_stop_loss_pct': 0,
             'best_cooldown': 0, 'best_drawdown_exit_pct': 0, 'best_reentry_rebound_pct': 0,
+            'best_rsi_oversold': DEFAULT_STRATEGY_PARAMETERS["rsi_oversold"],
+            'best_rsi_overbought': DEFAULT_STRATEGY_PARAMETERS["rsi_overbought"],
+            'use_rsi_filter': True,
+            'rsi_period': DEFAULT_RSI_PERIOD,
             'best_exposure_multiplier': 1.0,
             'effective_cooldown': 0, 'effective_drawdown_exit_pct': 0,
             'effective_reentry_rebound_pct': 0,
@@ -1636,6 +1895,10 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=(3,10), long_ema_bounds=(80,30
     results_df["cooldown_period"] = results_df["best_cooldown"]
     results_df["drawdown_exit_pct"] = results_df["best_drawdown_exit_pct"]
     results_df["reentry_rebound_pct"] = results_df["best_reentry_rebound_pct"]
+    results_df["rsi_oversold"] = results_df["best_rsi_oversold"]
+    results_df["rsi_overbought"] = results_df["best_rsi_overbought"]
+    results_df["rsi_period"] = results_df.get("rsi_period", DEFAULT_RSI_PERIOD)
+    results_df["use_rsi_filter"] = True
     results_df["exposure_multiplier"] = results_df["best_exposure_multiplier"]
     results_df["max_drawdown_pct"] = results_df["max_dd_pct"]
     results_df["param_set_id"] = results_df.apply(lambda row: build_param_set_id(row.to_dict()), axis=1)
@@ -1658,14 +1921,19 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                          pop_ranges_value, gen_ranges_value, initial_capital=10000,
                          strategy_profile_value="generic", ga_seed_value=None,
                          mutation_rates_value=None, crossover_rates_value=None,
+                         short_ema_bounds_value=DEFAULT_SHORT_EMA_BOUNDS,
+                         long_ema_bounds_value=DEFAULT_LONG_EMA_BOUNDS,
                          reuse_tuned_params_value=False, price_column_value="TotalReturn",
                          ga_search_preset_value="grid", profile_override_preset_value="default"):
     """Run the full walk-forward GA backtest for a single CSV data source."""
     global log_file, csv_name, lookback_years, offset_months, pop_ranges
     global gen_ranges, mutation_rates, crossover_rates, reuse_tuned_params
     global batch_name, started_at, strategy_profile, ga_seed
+    global history_fallback_files, skip_top5_refresh_for_run
 
     ensure_output_dirs()
+    history_fallback_files = []
+    skip_top5_refresh_for_run = False
     csv_path = resolve_input_csv_path(csv_file)
     csv_name = infer_fund_output_label(csv_path)
     lookback_years = lookback_years_value
@@ -1674,20 +1942,43 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
     gen_ranges = gen_ranges_value
     mutation_rates = mutation_rates_value or []
     crossover_rates = crossover_rates_value or []
+    short_ema_bounds_value, long_ema_bounds_value = validate_ema_bounds(
+        normalize_ema_bounds(short_ema_bounds_value, "--short-ema-bounds"),
+        normalize_ema_bounds(long_ema_bounds_value, "--long-ema-bounds"),
+    )
+    short_ema_bounds_value, long_ema_bounds_value, _, _, _, _ = resolve_profile_gene_bounds(
+        strategy_profile_value,
+        short_ema_bounds_value,
+        long_ema_bounds_value,
+        (8, 15),
+        (0, 3),
+        (2.5, 4.0),
+        (1.0, 3.0),
+    )
+    short_ema_bounds_value, long_ema_bounds_value = validate_ema_bounds(
+        short_ema_bounds_value,
+        long_ema_bounds_value,
+    )
     reuse_tuned_params = reuse_tuned_params_value
     strategy_profile = strategy_profile_value
     ga_seed = ga_seed_value
     batch_name = f"{csv_name}, {lookback_years}Y, {offset_months}M, profile={strategy_profile}"
     started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    machine_metadata = get_machine_metadata()
 
     now = datetime.now()
     log_filename = LOGS_DIR / f"{csv_name}-{lookback_years}Y-{offset_months}M-{strategy_profile}-ga10-{now.strftime('%Y%m%d_%H%M%S')}.txt"
     log_file = open(log_filename, 'w')
     log_print(f"=== Trading Strategy Backtest Log ===")
     log_print(f"Started at: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    log_print(f"Machine: {machine_metadata['machine_name']}")
+    log_print(f"Hostname: {machine_metadata['hostname']}")
+    log_print(f"Platform: {machine_metadata['platform']}")
+    log_print(f"Python: {machine_metadata['python_version']}")
     log_print(f"Log file: {log_filename}")
     log_print(f"Strategy profile: {strategy_profile}")
     log_print(f"GA seed: {ga_seed if ga_seed is not None else 'deterministic'}")
+    log_print(f"EMA bounds: short={short_ema_bounds_value}, long={long_ema_bounds_value}")
     log_print(f"GA mutation rates: {mutation_rates if mutation_rates else 'default grid'}")
     log_print(f"GA crossover rates: {crossover_rates if crossover_rates else 'default grid'}")
     log_print(f"Reuse tuned params: {reuse_tuned_params}")
@@ -1731,7 +2022,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         df_clean['NAV'] = pd.to_numeric(df_clean['NAV'], errors='coerce')
         df_clean = df_clean.dropna(subset=['NAV'])
         df_clean = df_clean.set_index('Date')
-        df_clean['RSI'] = calculate_rsi(df_clean['NAV'], 14)
+        df_clean['RSI'] = calculate_rsi(df_clean['NAV'], DEFAULT_RSI_PERIOD)
 
         log_print(f"Loading data from {csv_path}...")
         log_print(f"Price data loaded from {price_col}: {len(df_clean)} valid data points")
@@ -1755,6 +2046,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "ga_search_preset": ga_search_preset_value,
             "pop_ranges": pop_ranges,
             "gen_ranges": gen_ranges,
+            "short_ema_bounds": short_ema_bounds_value,
+            "long_ema_bounds": long_ema_bounds_value,
             "mutation_rates": mutation_rates or "default grid",
             "crossover_rates": crossover_rates or "default grid",
         }
@@ -1781,6 +2074,9 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             gen_ranges,
             mutation_rates,
             crossover_rates,
+            short_ema_bounds_value,
+            long_ema_bounds_value,
+            machine_metadata,
         )
         strategy_parameter_metadata = build_strategy_parameter_metadata(
             {},
@@ -1830,6 +2126,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             if len(df_tune) >= 100:
                 tune_result = tune_ga_hyperparams(
                     df_tune,
+                    short_ema_bounds=short_ema_bounds_value,
+                    long_ema_bounds=long_ema_bounds_value,
                     strategy_profile_name=strategy_profile,
                     ga_seed_value=ga_seed,
                     mutation_rates_value=mutation_rates,
@@ -1878,6 +2176,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             else:
                 best_params = genetic_optimize_params(
                     lookback_data,
+                    short_ema_bounds=short_ema_bounds_value,
+                    long_ema_bounds=long_ema_bounds_value,
                     pop_size=pop_size,
                     generations=generations,
                     mutation_rate=mutation_rate,
@@ -1897,6 +2197,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 f"SL={best_params['stop_loss']:.2f}, CD={best_params['cooldown']}, "
                 f"DDX={best_params['drawdown_exit_pct']:.2f}, "
                 f"RBR={best_params['reentry_rebound_pct']:.2f}, "
+                f"RSI={best_params['rsi_oversold']}/{best_params['rsi_overbought']}, "
                 f"EXP={best_params.get('exposure_multiplier', 1.0):.2f}x"
             )
             params_history.append((
@@ -1907,6 +2208,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 best_params['cooldown'],
                 best_params['drawdown_exit_pct'],
                 best_params['reentry_rebound_pct'],
+                best_params['rsi_oversold'],
+                best_params['rsi_overbought'],
                 best_params.get('exposure_multiplier', 1.0)
             ))
 
@@ -1922,7 +2225,10 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             trade_start_idx = len(eval_data) - len(next_period_data)
 
             config = {
-                'use_rsi_filter': False,
+                'use_rsi_filter': True,
+                'rsi_oversold': best_params['rsi_oversold'],
+                'rsi_overbought': best_params['rsi_overbought'],
+                'rsi_period': best_params.get('rsi_period', DEFAULT_RSI_PERIOD),
                 'use_trend_filter': False,
                 'use_stop_loss': True,
                 'stop_loss_pct': best_params['stop_loss'],
@@ -1967,6 +2273,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     "cooldown": best_params['cooldown'],
                     "drawdown_exit_pct": best_params['drawdown_exit_pct'],
                     "reentry_rebound_pct": best_params['reentry_rebound_pct'],
+                    "rsi_oversold": best_params['rsi_oversold'],
+                    "rsi_overbought": best_params['rsi_overbought'],
                     "exposure_multiplier": best_params.get('exposure_multiplier', 1.0),
                 }),
                 "pop_size": pop_size,
@@ -1979,6 +2287,10 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 "cooldown": best_params['cooldown'],
                 "drawdown_exit_pct": best_params['drawdown_exit_pct'],
                 "reentry_rebound_pct": best_params['reentry_rebound_pct'],
+                "rsi_oversold": best_params['rsi_oversold'],
+                "rsi_overbought": best_params['rsi_overbought'],
+                "rsi_period": best_params.get('rsi_period', DEFAULT_RSI_PERIOD),
+                "use_rsi_filter": True,
                 "exposure_multiplier": best_params.get('exposure_multiplier', 1.0),
                 "effective_cooldown": best_params['effective_cooldown'],
                 "effective_drawdown_exit_pct": best_params['effective_drawdown_exit_pct'],
@@ -2008,7 +2320,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 'Date', 'NAV', f'EMA_{best_params["short_ema"]}', f'EMA_{best_params["long_ema"]}',
                 'RSI', 'EMA_Signal', 'Final_Signal', 'Position', 'Exposure', 'Portfolio_Value',
                 'Short_EMA_Value', 'Long_EMA_Value', 'Long_EMA_Slope_5',
-                'Sell_Regime_OK', 'Recovery_Buy_Override'
+                'Sell_Regime_OK', 'Recovery_Buy_Override',
+                'RSI_Filter_Block', 'RSI_Sell_Block', 'RSI_Buy_Block'
             ]].copy()
             adaptive_results.append(adaptive_df_period)
             all_decisions.append(decisions_df)
@@ -2050,7 +2363,14 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             final_return = 0
             log_print("No portfolio history generated due to insufficient data or errors.")
 
-        bh_portfolio, bh_return = buy_and_hold_strategy(df_clean[df_clean.index >= start_date], initial_capital)
+        backtest_data = df_clean[df_clean.index >= start_date]
+        if backtest_data.empty:
+            log_print(
+                "No forward-test data available. "
+                f"Need data after {start_date.strftime('%Y-%m-%d')}, "
+                f"but CSV ends at {end_date.strftime('%Y-%m-%d')}."
+            )
+        bh_portfolio, bh_return = buy_and_hold_strategy(backtest_data, initial_capital)
         summary_metrics = calculate_index_strategy_metrics(adaptive_df, all_trades, initial_capital)
         final_return = summary_metrics['adaptive_return']
         excess_return = summary_metrics['excess_return']
@@ -2084,10 +2404,11 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         log_print(f"Stop-Loss Exit Count: {summary_metrics['stop_loss_count']}")
 
         log_print(f"\nParameter History:")
-        for date, short, long, sl, cd, drawdown_exit_pct, reentry_rebound_pct, exposure_multiplier in params_history:
+        for date, short, long, sl, cd, drawdown_exit_pct, reentry_rebound_pct, rsi_oversold, rsi_overbought, exposure_multiplier in params_history:
             log_print(
                 f"{date.strftime('%Y-%m-%d')}: EMA({short}, {long}), SL={sl:.2f}, "
                 f"CD={cd}, DDX={drawdown_exit_pct:.2f}, RBR={reentry_rebound_pct:.2f}, "
+                f"RSI={rsi_oversold}/{rsi_overbought}, "
                 f"EXP={exposure_multiplier:.2f}x"
             )
 
@@ -2108,14 +2429,45 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         started_at2 = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S")
         completed_at2 = datetime.strptime(completed_at, "%Y-%m-%d %H:%M:%S")
         duration = completed_at2 - started_at2
+        duration_seconds = int(duration.total_seconds())
+        duration_minutes = round(duration_seconds / 60, 2)
         log_print(f"Duration: {duration}")
+        log_print(f"Duration seconds: {duration_seconds}")
         hours, remainder = divmod(duration.total_seconds(), 3600)
         minutes, seconds = divmod(remainder, 60)
         print(f"{int(hours)} hours {int(minutes)} minutes {int(seconds)} seconds")
+        if history_fallback_files:
+            log_print("\nHistory fallback files used during this run:")
+            for entry in history_fallback_files:
+                log_print(f"- {entry}")
 
-        plt.figure(figsize=(15, 12))
+        last_chart_params = params_history[-1] if params_history else None
+        mutation_label = ",".join(str(value) for value in mutation_rates) if mutation_rates else "default grid"
+        crossover_label = ",".join(str(value) for value in crossover_rates) if crossover_rates else "default grid"
+        if last_chart_params:
+            final_param_text = (
+                "Final selected params\n"
+                f"EMA: {last_chart_params[1]} / {last_chart_params[2]} | "
+                f"SL: {last_chart_params[3]:.2f} | CD: {last_chart_params[4]}\n"
+                f"DDX: {last_chart_params[5]:.2f} | RBR: {last_chart_params[6]:.2f} | "
+                f"RSI: {last_chart_params[7]} / {last_chart_params[8]} | "
+                f"EXP: {last_chart_params[9]:.2f}x"
+            )
+        else:
+            final_param_text = "Final selected params\nNo valid walk-forward parameter set"
+        technical_param_text = (
+            "Configured\n"
+            f"Price: {price_col} | Lookback/offset: {lookback_years}Y/{offset_months}M | Profile: {strategy_profile}\n"
+            f"EMA bounds: {short_ema_bounds_value}/{long_ema_bounds_value} | "
+            f"GA: pop={pop_ranges}, gen={gen_ranges}, mut={mutation_label}, cross={crossover_label}\n"
+            f"Best GA combo: {best_ga_params if best_ga_params is not None else 'not retuned'}\n\n"
+            f"{final_param_text}"
+        )
 
-        plt.subplot(3, 1, 1)
+        fig = plt.figure(figsize=(15, 12))
+        grid = fig.add_gridspec(3, 1, height_ratios=[1.2, 0.8, 0.8])
+
+        plt.subplot(grid[0])
         if not adaptive_df.empty and 'NAV' in adaptive_df.columns:
             x_nav = adaptive_df['Date'] if 'Date' in adaptive_df.columns else adaptive_df.index
             y_nav = adaptive_df['NAV']
@@ -2124,7 +2476,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             y_nav = df_clean['NAV']
         plt.plot(x_nav, y_nav, label=price_col, linewidth=1.5, color='black')
 
-        for i, (date, short, long, sl, cd, drawdown_exit_pct, reentry_rebound_pct, exposure_multiplier) in enumerate(params_history):
+        for i, (date, short, long, sl, cd, drawdown_exit_pct, reentry_rebound_pct, rsi_oversold, rsi_overbought, exposure_multiplier) in enumerate(params_history):
             mask = (adaptive_df['Date'] >= date) & (adaptive_df['Date'] < (date + pd.DateOffset(months=offset_months))) if 'Date' in adaptive_df.columns else slice(None)
             period_data = adaptive_df.loc[mask] if not adaptive_df.empty else pd.DataFrame()
             if not period_data.empty and f'EMA_{short}' in period_data.columns:
@@ -2142,27 +2494,47 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             plt.scatter(x_sell, sell_signals['NAV'], color='red', marker='v', s=100, label='Sell Signal', zorder=5)
 
         plt.title(f'Index-Tuned Adaptive Strategy {csv_name}-{lookback_years}Y-{offset_months}M {strategy_profile} ga10', fontsize=14, fontweight='bold')
+        plt.gca().text(
+            0.01,
+            0.98,
+            technical_param_text,
+            transform=plt.gca().transAxes,
+            va='top',
+            ha='left',
+            fontsize=8.5,
+            bbox={'boxstyle': 'round,pad=0.45', 'facecolor': 'white', 'edgecolor': '#cccccc', 'alpha': 0.9},
+        )
         plt.ylabel(price_col)
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.xticks(rotation=45)
 
-        plt.subplot(3, 1, 2)
+        plt.subplot(grid[1])
         rsi_data = df_clean[df_clean.index >= start_date].copy()
         plt.plot(rsi_data.index, rsi_data['RSI'], label='RSI', color='orange')
-        plt.axhline(y=30, color='g', linestyle='--', alpha=0.7, label='Oversold Guard (30)')
-        plt.title('RSI Indicator (Oversold Sell Suppression)', fontsize=12)
+        if params_history:
+            avg_rsi_oversold = np.mean([entry[7] for entry in params_history])
+            avg_rsi_overbought = np.mean([entry[8] for entry in params_history])
+            plt.axhline(y=avg_rsi_oversold, color='g', linestyle='--', alpha=0.7, label=f'Avg Oversold Guard ({avg_rsi_oversold:.0f})')
+            plt.axhline(y=avg_rsi_overbought, color='r', linestyle='--', alpha=0.7, label=f'Avg Overbought Guard ({avg_rsi_overbought:.0f})')
+        else:
+            plt.axhline(y=DEFAULT_STRATEGY_PARAMETERS["rsi_oversold"], color='g', linestyle='--', alpha=0.7, label='Oversold Guard')
+            plt.axhline(y=DEFAULT_STRATEGY_PARAMETERS["rsi_overbought"], color='r', linestyle='--', alpha=0.7, label='Overbought Guard')
+        plt.title('RSI Indicator (GA-Tuned Entry/Exit Guards)', fontsize=12)
         plt.ylabel('RSI')
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.xticks(rotation=45)
 
-        plt.subplot(3, 1, 3)
+        plt.subplot(grid[2])
         if not portfolio_df.empty:
             x_port = portfolio_df['Date'] if 'Date' in portfolio_df.columns else portfolio_df.index
             plt.plot(x_port, portfolio_df['Portfolio_Value'], label=f'Adaptive Enhanced ({final_return:.2f}%)', linewidth=2, color='green')
-        bh_x = df_clean.index[df_clean.index >= start_date]
-        plt.plot(bh_x, bh_portfolio, label=f'Buy & Hold ({bh_return:.2f}%)', linewidth=2, color='blue')
+        bh_x = backtest_data.index
+        if len(bh_x) == len(bh_portfolio) and len(bh_x) > 0:
+            plt.plot(bh_x, bh_portfolio, label=f'Buy & Hold ({bh_return:.2f}%)', linewidth=2, color='blue')
+        else:
+            log_print("Skipping buy-and-hold chart line because no forward-test dates are available.")
 
         plt.title('Portfolio Value Comparison', fontsize=14, fontweight='bold')
         plt.xlabel('Date')
@@ -2195,7 +2567,10 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         run_row = {
             **run_metadata,
             "run_completed_at": completed_at,
+            "run_status": "completed" if len(backtest_data) > 0 else "insufficient_data",
             "duration": str(duration),
+            "duration_seconds": duration_seconds,
+            "duration_minutes": duration_minutes,
             "log_file": str(log_filename),
             "chart_file": str(png_file),
             "final_portfolio_value": portfolio_value,
@@ -2221,7 +2596,10 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "last_cooldown": last_params[4] if last_params else "",
             "last_drawdown_exit_pct": last_params[5] if last_params else "",
             "last_reentry_rebound_pct": last_params[6] if last_params else "",
-            "last_exposure_multiplier": last_params[7] if last_params else "",
+            "last_rsi_oversold": last_params[7] if last_params else "",
+            "last_rsi_overbought": last_params[8] if last_params else "",
+            "last_rsi_period": DEFAULT_RSI_PERIOD if last_params else "",
+            "last_exposure_multiplier": last_params[9] if last_params else "",
         }
         append_csv_row(RUN_HISTORY_FILE, run_row)
         refresh_top5_parameter_sets()
@@ -2259,6 +2637,10 @@ if __name__ == "__main__":
         gen_ranges = pop_ranges
     else:
         gen_ranges = normalize_pop_ranges(args.gen_ranges)
+    short_ema_bounds, long_ema_bounds = validate_ema_bounds(
+        normalize_ema_bounds(args.short_ema_bounds, "--short-ema-bounds"),
+        normalize_ema_bounds(args.long_ema_bounds, "--long-ema-bounds"),
+    )
     if args.ga_search_preset == "focused":
         mutation_rates = normalize_float_ranges(args.mutation_rates, [0.01])
         crossover_rates = normalize_float_ranges(args.crossover_rates, [0.6])
@@ -2275,6 +2657,7 @@ if __name__ == "__main__":
     print(
         f"Using lookback_years={lookback_years}, offset_months={offset_months}, "
         f"pop_ranges={pop_ranges}, gen_ranges={gen_ranges}, symbols={args.symbols}, "
+        f"short_ema_bounds={short_ema_bounds}, long_ema_bounds={long_ema_bounds}, "
         f"download_years={args.download_years}, ga_seed={args.ga_seed}, "
         f"data_file={args.data_file}, data_files={args.data_files}, fund_glob={args.fund_glob}, "
         f"price_column={args.price_column}, profile_override_preset={args.profile_override_preset}, "
@@ -2317,6 +2700,8 @@ if __name__ == "__main__":
             ga_seed_value=args.ga_seed,
             mutation_rates_value=mutation_rates,
             crossover_rates_value=crossover_rates,
+            short_ema_bounds_value=short_ema_bounds,
+            long_ema_bounds_value=long_ema_bounds,
             reuse_tuned_params_value=reuse_tuned_params,
             price_column_value=args.price_column,
             ga_search_preset_value=args.ga_search_preset,

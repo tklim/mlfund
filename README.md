@@ -73,6 +73,35 @@ Use `--lookback-years 1` and `--offset-months 6` to train GA on the previous 1 y
 python scripts/backtest-ema-ga10-index.py --data-file data/MAKGCF_GreaterChina_nav_3Y.csv --lookback-years 1 --offset-months 6 --pop_ranges 10 --gen_ranges 10 --ga-search-preset focused
 ```
 
+### EMA Search Bounds
+
+By default, GA searches a wider EMA range:
+
+- Short EMA: `2` to `60`
+- Long EMA: `30` to `300`
+
+Wider EMA bounds increase the search space. For serious runs, consider increasing `--pop_ranges` or `--gen_ranges` so GA has more chances to converge.
+
+To test a narrower custom EMA range:
+
+```bash
+python scripts/backtest-ema-ga10-index.py --data-file data/MAKGCF_GreaterChina_nav_3Y.csv --short-ema-bounds 3 20 --long-ema-bounds 80 250 --pop_ranges 10 --gen_ranges 10 --ga-search-preset focused
+```
+
+### RSI GA Tuning
+
+GA also tunes the RSI guard levels while keeping `rsi_period=14` fixed:
+
+- RSI oversold: `10` to `40`
+- RSI overbought: `60` to `90`
+
+The RSI guard is defensive rather than a standalone signal:
+
+- Oversold RSI blocks sell signals, helping avoid selling into sharp dips.
+- Overbought RSI blocks new buys and reentries, including recovery-buy overrides.
+
+Adding RSI expands the GA search space. `--pop_ranges 10 --gen_ranges 10 --ga-search-preset focused` is still useful for quick tests, but serious tuning may need larger population or generation sizes to reduce noisy winners.
+
 ### Use a Different Price Column
 
 By default the script uses `TotalReturn`. If you want to test raw NAV instead:
@@ -92,6 +121,7 @@ Each run generates:
 - A text log file in `outputs/logs/` such as `MAPF_Progress-2Y-6M-generic-ga10-YYYYMMDD_HHMMSS.txt`
 - A chart PNG in `outputs/charts/` such as `MAPF_Progress-2Y-6M-generic-ga10-tuned-YYYYMMDD-HHMMSS.png`
 - A GA tuning summary in `outputs/tunings/` such as `ga_tuning_summary_YYYYMMDD_HHMMSS.csv`
+- Persistent tuning history CSVs in `outputs/tunings/`, including the EMA bounds used plus the winning EMA, RSI, stop-loss, cooldown, drawdown-exit, reentry-rebound, and exposure values selected by GA
 
 ## Output
 
