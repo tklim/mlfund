@@ -717,13 +717,18 @@ def refresh_top5_parameter_sets():
     numeric_cols = [
         "score",
         "excess_return_pct",
+        "adaptive_annualized_return_pct",
+        "buy_hold_annualized_return_pct",
+        "excess_annualized_return_pct",
         "sharpe",
         "max_drawdown_pct",
         "trade_count",
     ]
     for col in numeric_cols:
-        if col in history.columns:
-            history[col] = pd.to_numeric(history[col], errors="coerce")
+        if col not in history.columns:
+            history[col] = np.nan
+    for col in numeric_cols:
+        history[col] = pd.to_numeric(history[col], errors="coerce")
     if "best" in history.columns:
         history["best_flag"] = history["best"].astype(str).str.lower().isin(["true", "1", "yes"])
     else:
@@ -735,6 +740,9 @@ def refresh_top5_parameter_sets():
         avg_score=("score", "mean"),
         median_score=("score", "median"),
         avg_excess_return_pct=("excess_return_pct", "mean"),
+        avg_adaptive_annualized_return_pct=("adaptive_annualized_return_pct", "mean"),
+        avg_buy_hold_annualized_return_pct=("buy_hold_annualized_return_pct", "mean"),
+        avg_excess_annualized_return_pct=("excess_annualized_return_pct", "mean"),
         avg_sharpe=("sharpe", "mean"),
         avg_max_dd_pct=("max_drawdown_pct", "mean"),
         avg_trade_count=("trade_count", "mean"),
@@ -1415,12 +1423,50 @@ def buy_and_hold_strategy(df, initial_capital=10000):
     
     return portfolio_values, total_return
 
+
+def dataframe_date_range(df):
+    """Return the first and last valid dates from a result/dataframe."""
+    if df is None or len(df) == 0:
+        return None, None
+    if "Date" in df.columns:
+        raw_dates = df["Date"]
+    else:
+        raw_dates = df.index
+    dates = pd.Series(pd.to_datetime(raw_dates, errors="coerce")).dropna()
+    if dates.empty:
+        return None, None
+    return dates.min(), dates.max()
+
+
+def annualized_return_from_pct(total_return_pct, start_date, end_date):
+    """Convert a total return percentage over a date range into annualized return."""
+    if start_date is None or end_date is None:
+        return 0.0
+    try:
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+        if pd.isna(start_ts) or pd.isna(end_ts):
+            return 0.0
+        days = (end_ts - start_ts).days
+        growth = 1 + (float(total_return_pct) / 100)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if days <= 0:
+        return 0.0
+    if growth <= 0:
+        return -100.0
+    return (growth ** (365.25 / days) - 1) * 100
+
+
 def calculate_index_strategy_metrics(df_result, trades, initial_capital=10000, long_ema=None):
     """Calculate benchmark-aware summary metrics for index runs."""
     metrics = {
         'adaptive_return': 0.0,
         'buy_hold_return': 0.0,
         'excess_return': 0.0,
+        'adaptive_annualized_return': 0.0,
+        'buy_hold_annualized_return': 0.0,
+        'excess_annualized_return': 0.0,
         'sharpe': 0.0,
         'max_dd': 0.0,
         'trade_count': len(trades),
@@ -1439,6 +1485,16 @@ def calculate_index_strategy_metrics(df_result, trades, initial_capital=10000, l
     _, buy_hold_return = buy_and_hold_strategy(df_result, initial_capital=initial_capital)
     metrics['buy_hold_return'] = buy_hold_return
     metrics['excess_return'] = metrics['adaptive_return'] - buy_hold_return
+    start_date, end_date = dataframe_date_range(df_result)
+    metrics['adaptive_annualized_return'] = annualized_return_from_pct(
+        metrics['adaptive_return'], start_date, end_date
+    )
+    metrics['buy_hold_annualized_return'] = annualized_return_from_pct(
+        metrics['buy_hold_return'], start_date, end_date
+    )
+    metrics['excess_annualized_return'] = (
+        metrics['adaptive_annualized_return'] - metrics['buy_hold_annualized_return']
+    )
 
     returns_series = portfolio_series.pct_change().dropna()
     if len(returns_series) > 0 and returns_series.std() != 0:
@@ -1838,6 +1894,9 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
             'adaptive_return_pct': metrics['adaptive_return'],
             'buy_hold_return_pct': metrics['buy_hold_return'],
             'excess_return_pct': metrics['excess_return'],
+            'adaptive_annualized_return_pct': metrics['adaptive_annualized_return'],
+            'buy_hold_annualized_return_pct': metrics['buy_hold_annualized_return'],
+            'excess_annualized_return_pct': metrics['excess_annualized_return'],
             'sharpe': metrics['sharpe'],
             'max_dd_pct': metrics['max_dd'],
             'trade_count': num_trades,
@@ -1866,6 +1925,9 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
             'effective_cooldown': 0, 'effective_drawdown_exit_pct': 0,
             'effective_reentry_rebound_pct': 0,
             'adaptive_return_pct': 0, 'buy_hold_return_pct': 0, 'excess_return_pct': 0,
+            'adaptive_annualized_return_pct': 0,
+            'buy_hold_annualized_return_pct': 0,
+            'excess_annualized_return_pct': 0,
             'sharpe': 0, 'max_dd_pct': 0, 'trade_count': 0, 'win_rate_pct': 0,
             'time_invested_pct': 0, 'uptrend_cash_pct': 0,
             'missed_upside_after_exit_pct': 0, 'score': 0
@@ -2300,6 +2362,10 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 "period_return_pct": period_metrics['adaptive_return'],
                 "period_buy_hold_return_pct": period_metrics['buy_hold_return'],
                 "period_excess_return_pct": period_metrics['excess_return'],
+                "period_adaptive_annualized_return_pct": period_metrics['adaptive_annualized_return'],
+                "period_annualized_return_pct": period_metrics['adaptive_annualized_return'],
+                "period_buy_hold_annualized_return_pct": period_metrics['buy_hold_annualized_return'],
+                "period_excess_annualized_return_pct": period_metrics['excess_annualized_return'],
                 "period_sharpe": period_metrics['sharpe'],
                 "period_max_dd_pct": period_metrics['max_dd'],
                 "period_trade_count": num_trades,
@@ -2397,6 +2463,9 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         log_print(f"Adaptive Enhanced Strategy Return:  {final_return:.2f}%  <<< ga10 (profile: {strategy_profile}, tuned: {tuned_summary})")
         log_print(f"Buy & Hold Return: {bh_return:.2f}%")
         log_print(f"Excess Return vs Buy & Hold: {excess_return:.2f}%")
+        log_print(f"Adaptive Annualized Return: {summary_metrics['adaptive_annualized_return']:.2f}%")
+        log_print(f"Buy & Hold Annualized Return: {summary_metrics['buy_hold_annualized_return']:.2f}%")
+        log_print(f"Excess Annualized Return vs Buy & Hold: {summary_metrics['excess_annualized_return']:.2f}%")
         log_print(f"Total Trades (Adaptive): {trade_count}")
         log_print(f"Percent Time Invested: {summary_metrics['time_invested_pct']:.2f}%")
         log_print(f"Percent Time In Cash During Uptrend: {summary_metrics['uptrend_cash_pct']:.2f}%")
@@ -2577,6 +2646,9 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "adaptive_return_pct": summary_metrics['adaptive_return'],
             "buy_hold_return_pct": summary_metrics['buy_hold_return'],
             "excess_return_pct": summary_metrics['excess_return'],
+            "adaptive_annualized_return_pct": summary_metrics['adaptive_annualized_return'],
+            "buy_hold_annualized_return_pct": summary_metrics['buy_hold_annualized_return'],
+            "excess_annualized_return_pct": summary_metrics['excess_annualized_return'],
             "sharpe": summary_metrics['sharpe'],
             "max_dd_pct": summary_metrics['max_dd'],
             "trade_count": trade_count,

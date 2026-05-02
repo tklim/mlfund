@@ -68,7 +68,7 @@ def parse_args():
         "--top-funds",
         type=int,
         default=2,
-        help="Number of top funds to chart after ranking by adaptive_return_pct. Use 0 for all funds (default: 2).",
+        help="Number of top funds to chart after ranking by adaptive annualized return. Use 0 for all funds (default: 2).",
     )
     return parser.parse_args()
 
@@ -88,6 +88,42 @@ def safe_float(row, key, default=0.0):
 
 def safe_int(row, key, default=0):
     return int(round(safe_float(row, key, default)))
+
+
+def annualized_return_from_pct(total_return_pct, start_date, end_date):
+    if start_date is None or end_date is None:
+        return 0.0
+    try:
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+        if pd.isna(start_ts) or pd.isna(end_ts):
+            return 0.0
+        days = (end_ts - start_ts).days
+        growth = 1 + (float(total_return_pct) / 100)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if days <= 0:
+        return 0.0
+    if growth <= 0:
+        return -100.0
+    return (growth ** (365.25 / days) - 1) * 100
+
+
+def fill_annualized_column(df, target_col, total_return_col):
+    if target_col in df.columns:
+        annualized = pd.to_numeric(df[target_col], errors="coerce")
+    else:
+        annualized = pd.Series(np.nan, index=df.index)
+
+    fallback = df.apply(
+        lambda row: annualized_return_from_pct(
+            row.get(total_return_col, 0.0),
+            row.get("backtest_start", row.get("data_start", None)),
+            row.get("backtest_end", row.get("data_end", None)),
+        ),
+        axis=1,
+    )
+    return annualized.fillna(fallback)
 
 
 def normalize_run_history(run_history_df):
@@ -141,6 +177,23 @@ def normalize_run_history(run_history_df):
     df["source_adaptive_return_pct"] = df["adaptive_return_pct"]
     df["source_buy_hold_return_pct"] = pd.to_numeric(df.get("buy_hold_return_pct", 0), errors="coerce")
     df["source_excess_return_pct"] = pd.to_numeric(df.get("excess_return_pct", 0), errors="coerce")
+    df["source_adaptive_annualized_return_pct"] = fill_annualized_column(
+        df, "adaptive_annualized_return_pct", "adaptive_return_pct"
+    )
+    df["source_buy_hold_annualized_return_pct"] = fill_annualized_column(
+        df, "buy_hold_annualized_return_pct", "buy_hold_return_pct"
+    )
+    if "excess_annualized_return_pct" in df.columns:
+        df["source_excess_annualized_return_pct"] = pd.to_numeric(
+            df["excess_annualized_return_pct"], errors="coerce"
+        )
+    else:
+        df["source_excess_annualized_return_pct"] = (
+            df["source_adaptive_annualized_return_pct"] - df["source_buy_hold_annualized_return_pct"]
+        )
+    df["source_excess_annualized_return_pct"] = df["source_excess_annualized_return_pct"].fillna(
+        df["source_adaptive_annualized_return_pct"] - df["source_buy_hold_annualized_return_pct"]
+    )
     df["source_sharpe"] = pd.to_numeric(df.get("sharpe", 0), errors="coerce")
     df["source_max_dd_pct"] = pd.to_numeric(df.get("max_dd_pct", 0), errors="coerce")
 
@@ -194,7 +247,7 @@ def select_best_run_rows(run_history_df, fund_label=None, top_funds=2):
         run_history_df["run_started_at_sort"] = pd.NaT
 
     sorted_runs = run_history_df.sort_values(
-        ["adaptive_return_pct", "run_started_at_sort"],
+        ["source_adaptive_annualized_return_pct", "run_started_at_sort"],
         ascending=[False, False],
     )
     rank1 = sorted_runs.groupby("canonical_fund_label", sort=False, as_index=False).head(1).reset_index(drop=True)
@@ -307,6 +360,8 @@ def format_final_parameter_box(params, price_column, initial_capital):
         f"Price: {price_column} | Initial capital: {initial_capital:,.0f}\n"
         f"Source adaptive: {safe_float(params, 'source_adaptive_return_pct', 0.0):.2f}% | "
         f"Source excess: {safe_float(params, 'source_excess_return_pct', 0.0):.2f}%\n"
+        f"Source annualized: {safe_float(params, 'source_adaptive_annualized_return_pct', 0.0):.2f}% | "
+        f"Source ann. excess: {safe_float(params, 'source_excess_annualized_return_pct', 0.0):.2f}%\n"
         f"{ga_line}\n\n"
         "Best parameters\n"
         f"EMA: {safe_int(params, 'short_ema')} / {safe_int(params, 'long_ema')} | "
@@ -583,6 +638,19 @@ def run_one_fund(row, args, run_timestamp):
     )
     metrics["buy_hold_return"] = buy_hold_return
     metrics["excess_return"] = metrics["adaptive_return"] - buy_hold_return
+    if "Date" in df_result.columns and len(df_result):
+        result_start_date = pd.to_datetime(df_result["Date"], errors="coerce").dropna().min()
+        result_end_date = pd.to_datetime(df_result["Date"], errors="coerce").dropna().max()
+    else:
+        result_start_date = df_result.index.min()
+        result_end_date = df_result.index.max()
+    adaptive_annualized = annualized_return_from_pct(
+        metrics["adaptive_return"], result_start_date, result_end_date
+    )
+    buy_hold_annualized = annualized_return_from_pct(
+        buy_hold_return, result_start_date, result_end_date
+    )
+    excess_annualized = adaptive_annualized - buy_hold_annualized
 
     plot_technical_chart(
         fund_label,
@@ -615,6 +683,7 @@ def run_one_fund(row, args, run_timestamp):
         f"Price column: {price_column}",
         f"Source run ID: {row.get('source_run_id', '')}",
         f"Source adaptive return: {safe_float(row, 'source_adaptive_return_pct', 0.0):.2f}%",
+        f"Source adaptive annualized return: {safe_float(row, 'source_adaptive_annualized_return_pct', 0.0):.2f}%",
         f"Started at: {started_at:%Y-%m-%d %H:%M:%S}",
         f"Completed at: {completed_at:%Y-%m-%d %H:%M:%S}",
         f"Duration seconds: {duration_seconds}",
@@ -630,8 +699,11 @@ def run_one_fund(row, args, run_timestamp):
         "",
         "Results:",
         f"Strategy return: {metrics['adaptive_return']:.2f}%",
+        f"Strategy annualized return: {adaptive_annualized:.2f}%",
         f"Buy & hold return: {buy_hold_return:.2f}%",
+        f"Buy & hold annualized return: {buy_hold_annualized:.2f}%",
         f"Excess return: {metrics['excess_return']:.2f}%",
+        f"Excess annualized return: {excess_annualized:.2f}%",
         f"Sharpe: {metrics['sharpe']:.4f}",
         f"Max drawdown: {metrics['max_dd']:.2f}%",
         f"Trades: {num_trades}",
@@ -643,7 +715,9 @@ def run_one_fund(row, args, run_timestamp):
     write_log(log_path, log_lines)
     print(
         f"{fund_label}: source_adaptive={safe_float(row, 'source_adaptive_return_pct', 0.0):.2f}%, "
+        f"source_ann={safe_float(row, 'source_adaptive_annualized_return_pct', 0.0):.2f}%, "
         f"replay_strategy={metrics['adaptive_return']:.2f}%, "
+        f"replay_ann={adaptive_annualized:.2f}%, "
         f"buy_hold={buy_hold_return:.2f}%, excess={metrics['excess_return']:.2f}%"
     )
 
@@ -674,12 +748,18 @@ def run_one_fund(row, args, run_timestamp):
         "source_adaptive_return_pct": row.get("source_adaptive_return_pct", ""),
         "source_buy_hold_return_pct": row.get("source_buy_hold_return_pct", ""),
         "source_excess_return_pct": row.get("source_excess_return_pct", ""),
+        "source_adaptive_annualized_return_pct": row.get("source_adaptive_annualized_return_pct", ""),
+        "source_buy_hold_annualized_return_pct": row.get("source_buy_hold_annualized_return_pct", ""),
+        "source_excess_annualized_return_pct": row.get("source_excess_annualized_return_pct", ""),
         "source_sharpe": row.get("source_sharpe", ""),
         "source_max_dd_pct": row.get("source_max_dd_pct", ""),
         "final_portfolio_value": df_result["Portfolio_Value"].iloc[-1],
         "adaptive_return_pct": metrics["adaptive_return"],
         "buy_hold_return_pct": buy_hold_return,
         "excess_return_pct": metrics["excess_return"],
+        "adaptive_annualized_return_pct": adaptive_annualized,
+        "buy_hold_annualized_return_pct": buy_hold_annualized,
+        "excess_annualized_return_pct": excess_annualized,
         "sharpe": metrics["sharpe"],
         "max_dd_pct": metrics["max_dd"],
         "trade_count": num_trades,
@@ -715,7 +795,7 @@ def main():
     if not args.fund_label and args.top_funds and args.top_funds > 0:
         print(
             f"Generating final charts for top {len(selected_rows)} fund(s) "
-            "ranked by historical adaptive_return_pct. Use --top-funds 0 to run all."
+            "ranked by historical adaptive annualized return. Use --top-funds 0 to run all."
         )
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
