@@ -123,6 +123,23 @@ Each run generates:
 - A GA tuning summary in `outputs/tunings/` such as `ga_tuning_summary_YYYYMMDD_HHMMSS.csv`
 - Persistent tuning history CSVs in `outputs/tunings/`, including the EMA bounds used plus the winning EMA, RSI, stop-loss, cooldown, drawdown-exit, reentry-rebound, and exposure values selected by GA
 
+### Strategy Review Dashboard
+
+Generate a review-ready strategy dashboard from the persistent run history:
+
+```bash
+python scripts/fund_strategy_review.py
+```
+
+The dashboard uses `outputs/tunings/backtest_run_history.csv` and creates:
+
+- `outputs/reports/fund_strategy_review.html`
+- `outputs/reports/fund_strategy_review.md`
+- leaderboard, parameter sensitivity, recommended next-run, and log cross-check CSVs in `outputs/reports/`
+- dashboard charts in `outputs/charts/strategy_review/`
+
+The report ranks current strategy candidates, compares adaptive returns against buy-and-hold, flags decision status, summarizes top-quartile parameter zones, and recommends the next tuning runs to explore.
+
 ## Output
 
 CSV files are saved to the `data/` folder with the format:
