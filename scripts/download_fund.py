@@ -24,7 +24,7 @@ HEADERS = {
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DATA_DIR = REPO_ROOT / "data"
-TRACKED_FUNDS = ["MAUS_RMH", "MGPRH", "MIIEH", "MAPF", "MGLVH", "MAKGCF", "HWFL", "MAPAC"]
+TRACKED_FUNDS = ["MAUS_RMH", "MGPRH", "MIIEH", "MAPF", "MGLVH", "MAKGCF", "HWFL", "MAPAC", "APCR", "MSGLR_RM"]
 
 
 def parse_args():
