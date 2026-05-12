@@ -250,6 +250,22 @@ def parse_args():
         help="Long EMA integer bounds for GA search (default: 30 300)"
     )
     parser.add_argument(
+        "--rsi-oversold-bounds",
+        nargs=2,
+        type=int,
+        default=list(DEFAULT_RSI_OVERSOLD_BOUNDS),
+        metavar=("MIN", "MAX"),
+        help="RSI oversold integer bounds for GA search (default: 10 40)"
+    )
+    parser.add_argument(
+        "--rsi-overbought-bounds",
+        nargs=2,
+        type=int,
+        default=list(DEFAULT_RSI_OVERBOUGHT_BOUNDS),
+        metavar=("MIN", "MAX"),
+        help="RSI overbought integer bounds for GA search (default: 60 90)"
+    )
+    parser.add_argument(
         "--symbols",
         nargs="+",
         default=["^GSPC", "QQQ"],
@@ -614,7 +630,10 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
                        reuse_tuned_params_value, pop_ranges_value,
                        gen_ranges_value, mutation_rates_value,
                        crossover_rates_value, short_ema_bounds_value,
-                       long_ema_bounds_value, machine_metadata=None):
+                       long_ema_bounds_value,
+                       rsi_oversold_bounds_value=DEFAULT_RSI_OVERSOLD_BOUNDS,
+                       rsi_overbought_bounds_value=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
+                       machine_metadata=None):
     machine_metadata = machine_metadata or get_machine_metadata()
     return {
         "run_id": run_id,
@@ -641,6 +660,10 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
         "short_ema_max": short_ema_bounds_value[1],
         "long_ema_min": long_ema_bounds_value[0],
         "long_ema_max": long_ema_bounds_value[1],
+        "rsi_oversold_min": rsi_oversold_bounds_value[0],
+        "rsi_oversold_max": rsi_oversold_bounds_value[1],
+        "rsi_overbought_min": rsi_overbought_bounds_value[0],
+        "rsi_overbought_max": rsi_overbought_bounds_value[1],
         "mutation_rates": ",".join(str(value) for value in mutation_rates_value) if mutation_rates_value else "default grid",
         "crossover_rates": ",".join(str(value) for value in crossover_rates_value) if crossover_rates_value else "default grid",
         "run_started_at": started_at,
@@ -717,18 +740,13 @@ def refresh_top5_parameter_sets():
     numeric_cols = [
         "score",
         "excess_return_pct",
-        "adaptive_annualized_return_pct",
-        "buy_hold_annualized_return_pct",
-        "excess_annualized_return_pct",
         "sharpe",
         "max_drawdown_pct",
         "trade_count",
     ]
     for col in numeric_cols:
-        if col not in history.columns:
-            history[col] = np.nan
-    for col in numeric_cols:
-        history[col] = pd.to_numeric(history[col], errors="coerce")
+        if col in history.columns:
+            history[col] = pd.to_numeric(history[col], errors="coerce")
     if "best" in history.columns:
         history["best_flag"] = history["best"].astype(str).str.lower().isin(["true", "1", "yes"])
     else:
@@ -740,9 +758,6 @@ def refresh_top5_parameter_sets():
         avg_score=("score", "mean"),
         median_score=("score", "median"),
         avg_excess_return_pct=("excess_return_pct", "mean"),
-        avg_adaptive_annualized_return_pct=("adaptive_annualized_return_pct", "mean"),
-        avg_buy_hold_annualized_return_pct=("buy_hold_annualized_return_pct", "mean"),
-        avg_excess_annualized_return_pct=("excess_annualized_return_pct", "mean"),
         avg_sharpe=("sharpe", "mean"),
         avg_max_dd_pct=("max_drawdown_pct", "mean"),
         avg_trade_count=("trade_count", "mean"),
@@ -889,6 +904,12 @@ def validate_ema_bounds(short_bounds, long_bounds):
     if long_bounds[1] <= short_bounds[0]:
         raise ValueError("long EMA maximum must be greater than short EMA minimum")
     return short_bounds, long_bounds
+
+
+def validate_rsi_bounds(oversold_bounds, overbought_bounds):
+    if oversold_bounds[1] >= overbought_bounds[0]:
+        raise ValueError("RSI oversold maximum must be less than RSI overbought minimum")
+    return oversold_bounds, overbought_bounds
 
 
 def log_print(message):
@@ -1423,50 +1444,12 @@ def buy_and_hold_strategy(df, initial_capital=10000):
     
     return portfolio_values, total_return
 
-
-def dataframe_date_range(df):
-    """Return the first and last valid dates from a result/dataframe."""
-    if df is None or len(df) == 0:
-        return None, None
-    if "Date" in df.columns:
-        raw_dates = df["Date"]
-    else:
-        raw_dates = df.index
-    dates = pd.Series(pd.to_datetime(raw_dates, errors="coerce")).dropna()
-    if dates.empty:
-        return None, None
-    return dates.min(), dates.max()
-
-
-def annualized_return_from_pct(total_return_pct, start_date, end_date):
-    """Convert a total return percentage over a date range into annualized return."""
-    if start_date is None or end_date is None:
-        return 0.0
-    try:
-        start_ts = pd.Timestamp(start_date)
-        end_ts = pd.Timestamp(end_date)
-        if pd.isna(start_ts) or pd.isna(end_ts):
-            return 0.0
-        days = (end_ts - start_ts).days
-        growth = 1 + (float(total_return_pct) / 100)
-    except (TypeError, ValueError, OverflowError):
-        return 0.0
-    if days <= 0:
-        return 0.0
-    if growth <= 0:
-        return -100.0
-    return (growth ** (365.25 / days) - 1) * 100
-
-
 def calculate_index_strategy_metrics(df_result, trades, initial_capital=10000, long_ema=None):
     """Calculate benchmark-aware summary metrics for index runs."""
     metrics = {
         'adaptive_return': 0.0,
         'buy_hold_return': 0.0,
         'excess_return': 0.0,
-        'adaptive_annualized_return': 0.0,
-        'buy_hold_annualized_return': 0.0,
-        'excess_annualized_return': 0.0,
         'sharpe': 0.0,
         'max_dd': 0.0,
         'trade_count': len(trades),
@@ -1485,16 +1468,6 @@ def calculate_index_strategy_metrics(df_result, trades, initial_capital=10000, l
     _, buy_hold_return = buy_and_hold_strategy(df_result, initial_capital=initial_capital)
     metrics['buy_hold_return'] = buy_hold_return
     metrics['excess_return'] = metrics['adaptive_return'] - buy_hold_return
-    start_date, end_date = dataframe_date_range(df_result)
-    metrics['adaptive_annualized_return'] = annualized_return_from_pct(
-        metrics['adaptive_return'], start_date, end_date
-    )
-    metrics['buy_hold_annualized_return'] = annualized_return_from_pct(
-        metrics['buy_hold_return'], start_date, end_date
-    )
-    metrics['excess_annualized_return'] = (
-        metrics['adaptive_annualized_return'] - metrics['buy_hold_annualized_return']
-    )
 
     returns_series = portfolio_series.pct_change().dropna()
     if len(returns_series) > 0 and returns_series.std() != 0:
@@ -1617,6 +1590,8 @@ def calculate_missed_upside_after_exits(df_result, trades):
 def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_ema_bounds=DEFAULT_LONG_EMA_BOUNDS,
                            sl_bounds=(8, 15), cd_bounds=(0, 3),
                            drawdown_exit_bounds=(2.5, 4.0), reentry_rebound_bounds=(1.0, 3.0),
+                           rsi_oversold_bounds=DEFAULT_RSI_OVERSOLD_BOUNDS,
+                           rsi_overbought_bounds=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                            pop_size=50, generations=50, mutation_rate=0.1, crossover_rate=0.7,
                            initial_capital=10000, strategy_profile_name="generic",
                            ga_seed_value=None, **kwargs):
@@ -1640,8 +1615,8 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
         {'low': cd_bounds[0], 'high': cd_bounds[1] + 1, 'step': 1},
         {'low': drawdown_exit_bounds[0], 'high': drawdown_exit_bounds[1]},
         {'low': reentry_rebound_bounds[0], 'high': reentry_rebound_bounds[1]},
-        {'low': DEFAULT_RSI_OVERSOLD_BOUNDS[0], 'high': DEFAULT_RSI_OVERSOLD_BOUNDS[1] + 1, 'step': 1},
-        {'low': DEFAULT_RSI_OVERBOUGHT_BOUNDS[0], 'high': DEFAULT_RSI_OVERBOUGHT_BOUNDS[1] + 1, 'step': 1},
+        {'low': rsi_oversold_bounds[0], 'high': rsi_oversold_bounds[1] + 1, 'step': 1},
+        {'low': rsi_overbought_bounds[0], 'high': rsi_overbought_bounds[1] + 1, 'step': 1},
     ]
     exposure_bounds = get_exposure_bounds(strategy_profile_name)
     uses_exposure_gene = exposure_bounds[1] > exposure_bounds[0]
@@ -1799,6 +1774,8 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
 def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_ema_bounds=DEFAULT_LONG_EMA_BOUNDS,
                         sl_bounds=(8,15), cd_bounds=(0,3),
                         drawdown_exit_bounds=(2.5,4.0), reentry_rebound_bounds=(1.0,3.0),
+                        rsi_oversold_bounds=DEFAULT_RSI_OVERSOLD_BOUNDS,
+                        rsi_overbought_bounds=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                         initial_capital=10000, strategy_profile_name="generic",
                         ga_seed_value=None, mutation_rates_value=None,
                         crossover_rates_value=None, return_best_params=False,
@@ -1821,7 +1798,7 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
         f"EMA short={short_ema_bounds}, EMA long={long_ema_bounds}, "
         f"SL={sl_bounds}, CD={cd_bounds}, DDX={drawdown_exit_bounds}, "
         f"RBR={reentry_rebound_bounds}, "
-        f"RSI={DEFAULT_RSI_OVERSOLD_BOUNDS}/{DEFAULT_RSI_OVERBOUGHT_BOUNDS}, "
+        f"RSI={rsi_oversold_bounds}/{rsi_overbought_bounds}, "
         f"EXP={get_exposure_bounds(strategy_profile_name)}"
     )
     mut_ranges = mutation_rates_value if mutation_rates_value else [0.01, 0.05, 0.1, 0.15]
@@ -1837,6 +1814,8 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
         best_params = genetic_optimize_params(
             df_tune, short_ema_bounds, long_ema_bounds, sl_bounds, cd_bounds,
             drawdown_exit_bounds, reentry_rebound_bounds,
+            rsi_oversold_bounds=rsi_oversold_bounds,
+            rsi_overbought_bounds=rsi_overbought_bounds,
             pop_size=pop, generations=gens, mutation_rate=mut, crossover_rate=cross,
             initial_capital=initial_capital,
             strategy_profile_name=strategy_profile_name,
@@ -1894,9 +1873,6 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
             'adaptive_return_pct': metrics['adaptive_return'],
             'buy_hold_return_pct': metrics['buy_hold_return'],
             'excess_return_pct': metrics['excess_return'],
-            'adaptive_annualized_return_pct': metrics['adaptive_annualized_return'],
-            'buy_hold_annualized_return_pct': metrics['buy_hold_annualized_return'],
-            'excess_annualized_return_pct': metrics['excess_annualized_return'],
             'sharpe': metrics['sharpe'],
             'max_dd_pct': metrics['max_dd'],
             'trade_count': num_trades,
@@ -1925,9 +1901,6 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
             'effective_cooldown': 0, 'effective_drawdown_exit_pct': 0,
             'effective_reentry_rebound_pct': 0,
             'adaptive_return_pct': 0, 'buy_hold_return_pct': 0, 'excess_return_pct': 0,
-            'adaptive_annualized_return_pct': 0,
-            'buy_hold_annualized_return_pct': 0,
-            'excess_annualized_return_pct': 0,
             'sharpe': 0, 'max_dd_pct': 0, 'trade_count': 0, 'win_rate_pct': 0,
             'time_invested_pct': 0, 'uptrend_cash_pct': 0,
             'missed_upside_after_exit_pct': 0, 'score': 0
@@ -1985,6 +1958,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                          mutation_rates_value=None, crossover_rates_value=None,
                          short_ema_bounds_value=DEFAULT_SHORT_EMA_BOUNDS,
                          long_ema_bounds_value=DEFAULT_LONG_EMA_BOUNDS,
+                         rsi_oversold_bounds_value=DEFAULT_RSI_OVERSOLD_BOUNDS,
+                         rsi_overbought_bounds_value=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                          reuse_tuned_params_value=False, price_column_value="TotalReturn",
                          ga_search_preset_value="grid", profile_override_preset_value="default"):
     """Run the full walk-forward GA backtest for a single CSV data source."""
@@ -2021,6 +1996,10 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         short_ema_bounds_value,
         long_ema_bounds_value,
     )
+    rsi_oversold_bounds_value, rsi_overbought_bounds_value = validate_rsi_bounds(
+        normalize_ema_bounds(rsi_oversold_bounds_value, "--rsi-oversold-bounds", minimum=0),
+        normalize_ema_bounds(rsi_overbought_bounds_value, "--rsi-overbought-bounds", minimum=1),
+    )
     reuse_tuned_params = reuse_tuned_params_value
     strategy_profile = strategy_profile_value
     ga_seed = ga_seed_value
@@ -2041,6 +2020,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
     log_print(f"Strategy profile: {strategy_profile}")
     log_print(f"GA seed: {ga_seed if ga_seed is not None else 'deterministic'}")
     log_print(f"EMA bounds: short={short_ema_bounds_value}, long={long_ema_bounds_value}")
+    log_print(f"RSI bounds: oversold={rsi_oversold_bounds_value}, overbought={rsi_overbought_bounds_value}")
     log_print(f"GA mutation rates: {mutation_rates if mutation_rates else 'default grid'}")
     log_print(f"GA crossover rates: {crossover_rates if crossover_rates else 'default grid'}")
     log_print(f"Reuse tuned params: {reuse_tuned_params}")
@@ -2110,6 +2090,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "gen_ranges": gen_ranges,
             "short_ema_bounds": short_ema_bounds_value,
             "long_ema_bounds": long_ema_bounds_value,
+            "rsi_oversold_bounds": rsi_oversold_bounds_value,
+            "rsi_overbought_bounds": rsi_overbought_bounds_value,
             "mutation_rates": mutation_rates or "default grid",
             "crossover_rates": crossover_rates or "default grid",
         }
@@ -2138,6 +2120,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             crossover_rates,
             short_ema_bounds_value,
             long_ema_bounds_value,
+            rsi_oversold_bounds_value,
+            rsi_overbought_bounds_value,
             machine_metadata,
         )
         strategy_parameter_metadata = build_strategy_parameter_metadata(
@@ -2190,6 +2174,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     df_tune,
                     short_ema_bounds=short_ema_bounds_value,
                     long_ema_bounds=long_ema_bounds_value,
+                    rsi_oversold_bounds=rsi_oversold_bounds_value,
+                    rsi_overbought_bounds=rsi_overbought_bounds_value,
                     strategy_profile_name=strategy_profile,
                     ga_seed_value=ga_seed,
                     mutation_rates_value=mutation_rates,
@@ -2240,6 +2226,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     lookback_data,
                     short_ema_bounds=short_ema_bounds_value,
                     long_ema_bounds=long_ema_bounds_value,
+                    rsi_oversold_bounds=rsi_oversold_bounds_value,
+                    rsi_overbought_bounds=rsi_overbought_bounds_value,
                     pop_size=pop_size,
                     generations=generations,
                     mutation_rate=mutation_rate,
@@ -2362,10 +2350,6 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 "period_return_pct": period_metrics['adaptive_return'],
                 "period_buy_hold_return_pct": period_metrics['buy_hold_return'],
                 "period_excess_return_pct": period_metrics['excess_return'],
-                "period_adaptive_annualized_return_pct": period_metrics['adaptive_annualized_return'],
-                "period_annualized_return_pct": period_metrics['adaptive_annualized_return'],
-                "period_buy_hold_annualized_return_pct": period_metrics['buy_hold_annualized_return'],
-                "period_excess_annualized_return_pct": period_metrics['excess_annualized_return'],
                 "period_sharpe": period_metrics['sharpe'],
                 "period_max_dd_pct": period_metrics['max_dd'],
                 "period_trade_count": num_trades,
@@ -2463,9 +2447,6 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         log_print(f"Adaptive Enhanced Strategy Return:  {final_return:.2f}%  <<< ga10 (profile: {strategy_profile}, tuned: {tuned_summary})")
         log_print(f"Buy & Hold Return: {bh_return:.2f}%")
         log_print(f"Excess Return vs Buy & Hold: {excess_return:.2f}%")
-        log_print(f"Adaptive Annualized Return: {summary_metrics['adaptive_annualized_return']:.2f}%")
-        log_print(f"Buy & Hold Annualized Return: {summary_metrics['buy_hold_annualized_return']:.2f}%")
-        log_print(f"Excess Annualized Return vs Buy & Hold: {summary_metrics['excess_annualized_return']:.2f}%")
         log_print(f"Total Trades (Adaptive): {trade_count}")
         log_print(f"Percent Time Invested: {summary_metrics['time_invested_pct']:.2f}%")
         log_print(f"Percent Time In Cash During Uptrend: {summary_metrics['uptrend_cash_pct']:.2f}%")
@@ -2528,6 +2509,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "Configured\n"
             f"Price: {price_col} | Lookback/offset: {lookback_years}Y/{offset_months}M | Profile: {strategy_profile}\n"
             f"EMA bounds: {short_ema_bounds_value}/{long_ema_bounds_value} | "
+            f"RSI bounds: {rsi_oversold_bounds_value}/{rsi_overbought_bounds_value} | "
             f"GA: pop={pop_ranges}, gen={gen_ranges}, mut={mutation_label}, cross={crossover_label}\n"
             f"Best GA combo: {best_ga_params if best_ga_params is not None else 'not retuned'}\n\n"
             f"{final_param_text}"
@@ -2646,9 +2628,6 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "adaptive_return_pct": summary_metrics['adaptive_return'],
             "buy_hold_return_pct": summary_metrics['buy_hold_return'],
             "excess_return_pct": summary_metrics['excess_return'],
-            "adaptive_annualized_return_pct": summary_metrics['adaptive_annualized_return'],
-            "buy_hold_annualized_return_pct": summary_metrics['buy_hold_annualized_return'],
-            "excess_annualized_return_pct": summary_metrics['excess_annualized_return'],
             "sharpe": summary_metrics['sharpe'],
             "max_dd_pct": summary_metrics['max_dd'],
             "trade_count": trade_count,
@@ -2713,6 +2692,10 @@ if __name__ == "__main__":
         normalize_ema_bounds(args.short_ema_bounds, "--short-ema-bounds"),
         normalize_ema_bounds(args.long_ema_bounds, "--long-ema-bounds"),
     )
+    rsi_oversold_bounds, rsi_overbought_bounds = validate_rsi_bounds(
+        normalize_ema_bounds(args.rsi_oversold_bounds, "--rsi-oversold-bounds", minimum=0),
+        normalize_ema_bounds(args.rsi_overbought_bounds, "--rsi-overbought-bounds", minimum=1),
+    )
     if args.ga_search_preset == "focused":
         mutation_rates = normalize_float_ranges(args.mutation_rates, [0.01])
         crossover_rates = normalize_float_ranges(args.crossover_rates, [0.6])
@@ -2730,6 +2713,7 @@ if __name__ == "__main__":
         f"Using lookback_years={lookback_years}, offset_months={offset_months}, "
         f"pop_ranges={pop_ranges}, gen_ranges={gen_ranges}, symbols={args.symbols}, "
         f"short_ema_bounds={short_ema_bounds}, long_ema_bounds={long_ema_bounds}, "
+        f"rsi_oversold_bounds={rsi_oversold_bounds}, rsi_overbought_bounds={rsi_overbought_bounds}, "
         f"download_years={args.download_years}, ga_seed={args.ga_seed}, "
         f"data_file={args.data_file}, data_files={args.data_files}, fund_glob={args.fund_glob}, "
         f"price_column={args.price_column}, profile_override_preset={args.profile_override_preset}, "
@@ -2774,6 +2758,8 @@ if __name__ == "__main__":
             crossover_rates_value=crossover_rates,
             short_ema_bounds_value=short_ema_bounds,
             long_ema_bounds_value=long_ema_bounds,
+            rsi_oversold_bounds_value=rsi_oversold_bounds,
+            rsi_overbought_bounds_value=rsi_overbought_bounds,
             reuse_tuned_params_value=reuse_tuned_params,
             price_column_value=args.price_column,
             ga_search_preset_value=args.ga_search_preset,
