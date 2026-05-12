@@ -140,6 +140,18 @@ The dashboard uses `outputs/tunings/backtest_run_history.csv` and creates:
 
 The report ranks current strategy candidates, compares adaptive returns against buy-and-hold, flags decision status, summarizes top-quartile parameter zones, and recommends the next tuning runs to explore.
 
+For a single fund, generate the review under `outputs/funds/{FUND_LABEL}/reports/`:
+
+```bash
+python scripts/fund_strategy_review.py --fund-label MIIEH_IndiaEquityRMH
+```
+
+Backtests still write global histories under `outputs/tunings/`, and also mirror fund-specific histories under `outputs/funds/{FUND_LABEL}/tunings/`. To backfill existing global histories into those fund folders:
+
+```bash
+python scripts/backfill_fund_outputs.py
+```
+
 ## Output
 
 CSV files are saved to the `data/` folder with the format:

@@ -14,6 +14,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_HISTORY_FILE = REPO_ROOT / "outputs" / "tunings" / "backtest_run_history.csv"
 DEFAULT_REPORT_DIR = REPO_ROOT / "outputs" / "reports"
 DEFAULT_CHART_DIR = REPO_ROOT / "outputs" / "charts" / "strategy_review"
+FUNDS_DIR = REPO_ROOT / "outputs" / "funds"
 
 NUMERIC_COLUMNS = [
     "lookback_years",
@@ -100,8 +101,13 @@ def parse_args():
     )
     parser.add_argument(
         "--history-file",
-        default=str(DEFAULT_HISTORY_FILE),
-        help="Backtest run history CSV to analyze.",
+        default=None,
+        help="Backtest run history CSV to analyze. Defaults to the global history, or the fund-specific history when --fund-label is used and available.",
+    )
+    parser.add_argument(
+        "--fund-label",
+        default=None,
+        help="Optional fund label to analyze. Writes reports under outputs/funds/<fund_label>/reports by default.",
     )
     parser.add_argument(
         "--report-dir",
@@ -122,7 +128,43 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_history(history_file):
+def sanitize_fund_folder_name(fund_label):
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fund_label or "").strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("._-")
+    return cleaned or "UnknownFund"
+
+
+def fund_output_dirs(fund_label):
+    fund_dir = FUNDS_DIR / sanitize_fund_folder_name(fund_label)
+    return {
+        "root": fund_dir,
+        "tunings": fund_dir / "tunings",
+        "reports": fund_dir / "reports",
+        "charts": fund_dir / "reports" / "charts",
+    }
+
+
+def fund_run_history_path(fund_label):
+    fund_name = sanitize_fund_folder_name(fund_label)
+    return fund_output_dirs(fund_name)["tunings"] / f"{fund_name}-backtest_run_history.csv"
+
+
+def resolve_inputs(args):
+    if args.fund_label:
+        fund_dirs = fund_output_dirs(args.fund_label)
+        default_fund_history = fund_run_history_path(args.fund_label)
+        history_file = Path(args.history_file).resolve() if args.history_file else (
+            default_fund_history if default_fund_history.exists() else DEFAULT_HISTORY_FILE
+        )
+        report_dir = Path(args.report_dir).resolve() if args.report_dir != str(DEFAULT_REPORT_DIR) else fund_dirs["reports"].resolve()
+        chart_dir = Path(args.chart_dir).resolve() if args.chart_dir != str(DEFAULT_CHART_DIR) else fund_dirs["charts"].resolve()
+        return history_file.resolve(), report_dir, chart_dir
+
+    history_file = Path(args.history_file).resolve() if args.history_file else DEFAULT_HISTORY_FILE.resolve()
+    return history_file, Path(args.report_dir).resolve(), Path(args.chart_dir).resolve()
+
+
+def load_history(history_file, fund_label=None):
     if not history_file.exists():
         raise FileNotFoundError(f"Run history not found: {history_file}")
 
@@ -135,6 +177,13 @@ def load_history(history_file):
 
     if "run_status" in df.columns:
         df = df[df["run_status"].astype(str).str.lower().eq("completed")].copy()
+
+    if fund_label:
+        if "fund_label" not in df.columns:
+            raise ValueError("--fund-label was supplied, but history has no fund_label column")
+        df = df[df["fund_label"].astype(str).eq(str(fund_label))].copy()
+        if df.empty:
+            raise ValueError(f"No completed rows found for fund_label={fund_label}")
 
     if "adaptive_return_pct" not in df.columns:
         raise ValueError("Required column missing: adaptive_return_pct")
@@ -955,14 +1004,12 @@ def build_markdown_report(
 
 def main():
     args = parse_args()
-    history_file = Path(args.history_file).resolve()
-    report_dir = Path(args.report_dir).resolve()
-    chart_dir = Path(args.chart_dir).resolve()
+    history_file, report_dir, chart_dir = resolve_inputs(args)
 
     report_dir.mkdir(parents=True, exist_ok=True)
     chart_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_history(history_file)
+    df = load_history(history_file, fund_label=args.fund_label)
     if df.empty:
         raise ValueError("No completed, usable runs found in history file.")
 

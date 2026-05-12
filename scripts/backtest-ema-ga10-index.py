@@ -46,6 +46,7 @@ OUTPUTS_DIR = REPO_ROOT / "outputs"
 LOGS_DIR = OUTPUTS_DIR / "logs"
 CHARTS_DIR = OUTPUTS_DIR / "charts"
 TUNINGS_DIR = OUTPUTS_DIR / "tunings"
+FUNDS_DIR = OUTPUTS_DIR / "funds"
 RUN_HISTORY_FILE = TUNINGS_DIR / "backtest_run_history.csv"
 WINDOW_HISTORY_FILE = TUNINGS_DIR / "backtest_window_history.csv"
 TUNING_HISTORY_FILE = TUNINGS_DIR / "backtest_tuning_history.csv"
@@ -587,6 +588,44 @@ def write_csv_with_lock_resilience(df, path, index=False, purpose="History CSV w
     )
 
 
+def sanitize_fund_folder_name(fund_label):
+    """Return a stable filesystem-safe fund folder name while preserving useful separators."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fund_label or "").strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("._-")
+    return cleaned or "UnknownFund"
+
+
+def fund_output_dirs(fund_label):
+    fund_dir = FUNDS_DIR / sanitize_fund_folder_name(fund_label)
+    return {
+        "root": fund_dir,
+        "tunings": fund_dir / "tunings",
+        "reports": fund_dir / "reports",
+    }
+
+
+def fund_history_paths(fund_label):
+    fund_name = sanitize_fund_folder_name(fund_label)
+    tuning_dir = fund_output_dirs(fund_name)["tunings"]
+    return {
+        "run": tuning_dir / f"{fund_name}-backtest_run_history.csv",
+        "window": tuning_dir / f"{fund_name}-backtest_window_history.csv",
+        "tuning": tuning_dir / f"{fund_name}-backtest_tuning_history.csv",
+        "top5": tuning_dir / f"{fund_name}-top5_parameter_sets.csv",
+    }
+
+
+def append_fund_history_rows(fund_label, history_key, rows):
+    if not rows:
+        return None
+    path = fund_history_paths(fund_label)[history_key]
+    return append_csv_rows(path, rows)
+
+
+def append_fund_history_row(fund_label, history_key, row):
+    return append_fund_history_rows(fund_label, history_key, [row])
+
+
 def build_strategy_parameter_metadata(config, profile_settings):
     params = dict(DEFAULT_STRATEGY_PARAMETERS)
     params.update({
@@ -776,6 +815,13 @@ def refresh_top5_parameter_sets():
         index=False,
         purpose="Top-5 parameter summary write",
     )
+    for fund_label, fund_top5 in top5.groupby("fund_label", dropna=False):
+        write_csv_with_lock_resilience(
+            fund_top5,
+            fund_history_paths(fund_label)["top5"],
+            index=False,
+            purpose=f"Fund top-5 parameter summary write ({fund_label})",
+        )
 
 
 def sanitize_label(value):
@@ -812,6 +858,7 @@ def ensure_output_dirs():
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     CHARTS_DIR.mkdir(parents=True, exist_ok=True)
     TUNINGS_DIR.mkdir(parents=True, exist_ok=True)
+    FUNDS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def resolve_input_csv_path(csv_file):
@@ -1944,6 +1991,9 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
     tune_csv = TUNINGS_DIR / tune_csv
     results_df.to_csv(tune_csv, index=False)
     append_csv_rows(TUNING_HISTORY_FILE, results_df.to_dict("records"))
+    fund_label = metadata.get("fund_label")
+    if fund_label:
+        append_fund_history_rows(fund_label, "tuning", results_df.to_dict("records"))
     refresh_top5_parameter_sets()
     log_print(f"\nFull results saved to: {tune_csv}")
     log_print(f"Best combo (max score {best_score:.3f}): pop={best_combo[0]}, gens={best_combo[1]}, mut={best_combo[2]}, cross={best_combo[3]}")
@@ -2361,6 +2411,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 "recorded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
             append_csv_row(WINDOW_HISTORY_FILE, window_row)
+            append_fund_history_row(csv_name, "window", window_row)
             portfolio_history.append(
                 df_result[['Date', 'Portfolio_Value', 'Position', 'Exposure']].copy()
                 if 'Date' in df_result.columns
@@ -2653,6 +2704,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "last_exposure_multiplier": last_params[9] if last_params else "",
         }
         append_csv_row(RUN_HISTORY_FILE, run_row)
+        append_fund_history_row(csv_name, "run", run_row)
         refresh_top5_parameter_sets()
 
         log_print("\n=== COMPLETED ===")
