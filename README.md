@@ -14,7 +14,7 @@ Automated NAV (Net Asset Value) and dividend data downloader for Manulife Invest
 ## Installation
 
 ```bash
-pip install pandas requests pygad matplotlib numpy
+pip install -r requirements.txt
 ```
 
 ## Usage

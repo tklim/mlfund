@@ -1,62 +1,99 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-from pathlib import Path
-import numpy as np
+import argparse
 import re
 
-# Read run history
-history_file = Path("C:/Users/tklim/OpenWork/mlfund/outputs/tunings/backtest_run_history.csv")
-if not history_file.exists():
-    print("Run history file not found")
-    exit()
+import numpy as np
+import pandas as pd
 
-df = pd.read_csv(history_file)
+from scripts.common import TUNINGS_DIR, resolve_repo_path, save_csv
 
-# Filter MIIEH runs
-miieh = df[df['fund_label'].str.contains('MIIEH', na=False)].copy()
 
-if miieh.empty:
-    print("No MIIEH runs found")
-    exit()
+def parse_args():
+    parser = argparse.ArgumentParser(description="Prepare cleaned run-history rows for one fund.")
+    parser.add_argument(
+        "--history-file",
+        default=str(TUNINGS_DIR / "backtest_run_history.csv"),
+        help="Backtest run history CSV. Relative paths resolve from repo root.",
+    )
+    parser.add_argument(
+        "--fund-label",
+        default="MIIEH",
+        help="Fund label substring to filter (default: MIIEH).",
+    )
+    parser.add_argument(
+        "--output-file",
+        default=str(TUNINGS_DIR / "miieh_analysis.csv"),
+        help="Cleaned analysis CSV output path.",
+    )
+    return parser.parse_args()
 
-print(f"Found {len(miieh)} MIIEH runs")
-print("\nColumns available:", miieh.columns.tolist())
 
-# Convert numeric columns
-numeric_cols = ['lookback_years', 'offset_months', 'adaptive_return_pct', 'sharpe', 'max_dd_pct', 
-                'excess_return_pct', 'last_short_ema', 'last_long_ema', 'last_stop_loss',
-                'last_cooldown', 'last_drawdown_exit_pct', 'last_reentry_rebound_pct']
+def extract_lookback(log_file):
+    if pd.isna(log_file):
+        return np.nan
+    match = re.search(r"_(\d+\.?\d*)Y-", str(log_file))
+    return float(match.group(1)) if match else np.nan
 
-for col in numeric_cols:
-    if col in miieh.columns:
-        miieh[col] = pd.to_numeric(miieh[col], errors='coerce')
 
-# Extract lookback and offset from log file names if columns missing
-if 'lookback_years' not in miieh.columns or miieh['lookback_years'].isna().all():
-    print("Extracting lookback_years from log file names...")
-    def extract_lookback(log_file):
-        if pd.isna(log_file):
-            return np.nan
-        match = re.search(r'_(\d+\.?\d*)Y-', str(log_file))
-        return float(match.group(1)) if match else np.nan
-    
-    if 'log_file' in miieh.columns:
-        miieh['lookback_years'] = miieh['log_file'].apply(extract_lookback)
+def extract_offset(log_file):
+    if pd.isna(log_file):
+        return np.nan
+    match = re.search(r"Y-(\d+)M-", str(log_file))
+    return int(match.group(1)) if match else np.nan
 
-if 'offset_months' not in miieh.columns or miieh['offset_months'].isna().all():
-    print("Extracting offset_months from log file names...")
-    def extract_offset(log_file):
-        if pd.isna(log_file):
-            return np.nan
-        match = re.search(r'Y-(\d+)M-', str(log_file))
-        return int(match.group(1)) if match else np.nan
-    
-    if 'log_file' in miieh.columns:
-        miieh['offset_months'] = miieh['log_file'].apply(extract_offset)
 
-print("\nSample data:")
-print(miieh[['lookback_years', 'offset_months', 'adaptive_return_pct', 'sharpe', 'max_dd_pct']].head(10))
+def main():
+    args = parse_args()
+    history_file = resolve_repo_path(args.history_file)
+    if not history_file.exists():
+        raise FileNotFoundError(f"Run history file not found: {history_file}")
 
-# Save cleaned data for visualization
-miieh.to_csv("C:/Users/tklim/OpenWork/mlfund/outputs/tunings/miieh_analysis.csv", index=False)
-print("\nSaved cleaned data to outputs/tunings/miieh_analysis.csv")
+    df = pd.read_csv(history_file)
+    fund_df = df[df["fund_label"].str.contains(args.fund_label, na=False)].copy()
+    if fund_df.empty:
+        raise ValueError(f"No runs found for fund label filter: {args.fund_label}")
+
+    print(f"Found {len(fund_df)} rows for {args.fund_label}")
+    print("\nColumns available:", fund_df.columns.tolist())
+
+    numeric_cols = [
+        "lookback_years",
+        "offset_months",
+        "adaptive_return_pct",
+        "adaptive_annualized_return_pct",
+        "sharpe",
+        "max_dd_pct",
+        "excess_return_pct",
+        "last_short_ema",
+        "last_long_ema",
+        "last_stop_loss",
+        "last_cooldown",
+        "last_drawdown_exit_pct",
+        "last_reentry_rebound_pct",
+    ]
+    for col in numeric_cols:
+        if col in fund_df.columns:
+            fund_df[col] = pd.to_numeric(fund_df[col], errors="coerce")
+
+    if "lookback_years" not in fund_df.columns or fund_df["lookback_years"].isna().all():
+        print("Extracting lookback_years from log file names...")
+        if "log_file" in fund_df.columns:
+            fund_df["lookback_years"] = fund_df["log_file"].apply(extract_lookback)
+
+    if "offset_months" not in fund_df.columns or fund_df["offset_months"].isna().all():
+        print("Extracting offset_months from log file names...")
+        if "log_file" in fund_df.columns:
+            fund_df["offset_months"] = fund_df["log_file"].apply(extract_offset)
+
+    print("\nSample data:")
+    print(
+        fund_df[
+            ["lookback_years", "offset_months", "adaptive_return_pct", "sharpe", "max_dd_pct"]
+        ].head(10)
+    )
+
+    output_file = save_csv(fund_df, resolve_repo_path(args.output_file))
+    print(f"\nSaved cleaned data to {output_file}")
+
+
+if __name__ == "__main__":
+    main()

@@ -5,7 +5,11 @@ venv/
 
 # Generated analysis outputs
 outputs/
+totalreturn_summary.csv
+historical_forward_return_probabilities.csv
+lognormal_model_probabilities.csv
 data/*_nav_*_20*.csv
+data/*_nav_*Y.csv
 
 # Local editor/system files
 .DS_Store
