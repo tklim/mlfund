@@ -138,7 +138,7 @@ The dashboard uses `outputs/tunings/backtest_run_history.csv` and creates:
 - leaderboard, parameter sensitivity, recommended next-run, and log cross-check CSVs in `outputs/reports/`
 - dashboard charts in `outputs/charts/strategy_review/`
 
-The report ranks current strategy candidates, compares adaptive returns against buy-and-hold, flags decision status, summarizes top-quartile parameter zones, and recommends the next tuning runs to explore.
+The report ranks current strategy candidates by annualized adaptive and excess return, compares adaptive returns against buy-and-hold on the same time basis, flags decision status, summarizes top-quartile parameter zones, and recommends the next tuning runs to explore.
 
 For a single fund, generate the review under `outputs/funds/{FUND_LABEL}/reports/`:
 

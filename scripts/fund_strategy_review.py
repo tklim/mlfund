@@ -56,6 +56,9 @@ NUMERIC_COLUMNS = [
 
 DISPLAY_COLUMNS = [
     "fund_label",
+    "adaptive_annualized_return_pct",
+    "buy_hold_annualized_return_pct",
+    "excess_annualized_return_pct",
     "adaptive_return_pct",
     "buy_hold_return_pct",
     "excess_return_pct",
@@ -187,17 +190,18 @@ def load_history(history_file, fund_label=None):
 
     if "adaptive_return_pct" not in df.columns:
         raise ValueError("Required column missing: adaptive_return_pct")
-    if "excess_return_pct" not in df.columns:
-        raise ValueError("Required column missing: excess_return_pct")
+    if "buy_hold_return_pct" not in df.columns:
+        raise ValueError("Required column missing: buy_hold_return_pct")
 
-    df = df.dropna(subset=["adaptive_return_pct", "excess_return_pct"]).copy()
+    df = ensure_annualized_returns(df)
+    df = df.dropna(subset=["adaptive_annualized_return_pct", "excess_annualized_return_pct"]).copy()
     df["decision_status"] = np.select(
         [
-            (df["adaptive_return_pct"] > 0) & (df["excess_return_pct"] > 0),
-            (df["adaptive_return_pct"] > 0) & (df["excess_return_pct"] <= 0),
+            (df["adaptive_annualized_return_pct"] > 0) & (df["excess_annualized_return_pct"] > 0),
+            (df["adaptive_annualized_return_pct"] > 0) & (df["excess_annualized_return_pct"] <= 0),
         ],
-        ["green: adaptive beats buy-and-hold", "amber: positive but trails buy-and-hold"],
-        default="red: negative adaptive return",
+        ["green: adaptive beats buy-and-hold annualized", "amber: positive annualized but trails buy-and-hold"],
+        default="red: negative adaptive annualized return",
     )
     return df
 
@@ -224,6 +228,60 @@ def safe_text(value):
     return str(value)
 
 
+def annualized_return_from_pct(total_return_pct, start_date, end_date):
+    if pd.isna(total_return_pct) or pd.isna(start_date) or pd.isna(end_date):
+        return np.nan
+    try:
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+        days = (end_ts - start_ts).days
+        growth = 1 + (float(total_return_pct) / 100)
+    except (TypeError, ValueError, OverflowError):
+        return np.nan
+    if days <= 0:
+        return np.nan
+    if growth <= 0:
+        return -100.0
+    return (growth ** (365.25 / days) - 1) * 100
+
+
+def ensure_annualized_returns(df):
+    required = [
+        "adaptive_annualized_return_pct",
+        "buy_hold_annualized_return_pct",
+        "excess_annualized_return_pct",
+    ]
+    for col in required:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    if not all(col in df.columns for col in ["backtest_start", "backtest_end"]):
+        return df
+
+    for total_col, annualized_col in [
+        ("adaptive_return_pct", "adaptive_annualized_return_pct"),
+        ("buy_hold_return_pct", "buy_hold_annualized_return_pct"),
+    ]:
+        missing = df[annualized_col].isna()
+        if missing.any() and total_col in df.columns:
+            df.loc[missing, annualized_col] = df.loc[missing].apply(
+                lambda row: annualized_return_from_pct(
+                    row.get(total_col),
+                    row.get("backtest_start"),
+                    row.get("backtest_end"),
+                ),
+                axis=1,
+            )
+
+    missing_excess = df["excess_annualized_return_pct"].isna()
+    if missing_excess.any():
+        df.loc[missing_excess, "excess_annualized_return_pct"] = (
+            df.loc[missing_excess, "adaptive_annualized_return_pct"]
+            - df.loc[missing_excess, "buy_hold_annualized_return_pct"]
+        )
+    return df
+
+
 def clipped_columns(df, columns):
     present = [col for col in columns if col in df.columns]
     return df[present].copy()
@@ -233,12 +291,12 @@ def build_leaderboards(df, top_n):
     boards = []
 
     definitions = [
-        ("best_adaptive_return", ["adaptive_return_pct", "sharpe"], [False, False]),
-        ("best_excess_return", ["excess_return_pct", "adaptive_return_pct"], [False, False]),
-        ("best_risk_adjusted", ["sharpe", "adaptive_return_pct"], [False, False]),
-        ("best_downside_control", ["max_dd_pct", "adaptive_return_pct"], [True, False]),
-        ("best_win_rate", ["win_rate_pct", "adaptive_return_pct"], [False, False]),
-        ("best_score", ["score", "adaptive_return_pct"], [False, False]),
+        ("best_adaptive_annualized_return", ["adaptive_annualized_return_pct", "sharpe"], [False, False]),
+        ("best_excess_annualized_return", ["excess_annualized_return_pct", "adaptive_annualized_return_pct"], [False, False]),
+        ("best_risk_adjusted", ["sharpe", "adaptive_annualized_return_pct"], [False, False]),
+        ("best_downside_control", ["max_dd_pct", "adaptive_annualized_return_pct"], [True, False]),
+        ("best_win_rate", ["win_rate_pct", "adaptive_annualized_return_pct"], [False, False]),
+        ("best_score", ["score", "adaptive_annualized_return_pct"], [False, False]),
     ]
 
     for name, sort_cols, ascending in definitions:
@@ -265,7 +323,9 @@ def build_parameter_summary(df):
         ("offset", ["offset_months"]),
     ]
     aggregations = {
-        "adaptive_return_pct": ["count", "mean", "median", "max"],
+        "adaptive_annualized_return_pct": ["count", "mean", "median", "max"],
+        "excess_annualized_return_pct": ["mean", "max"],
+        "adaptive_return_pct": ["mean", "max"],
         "excess_return_pct": ["mean", "max"],
         "sharpe": ["mean", "max"],
         "max_dd_pct": ["mean", "min"],
@@ -286,8 +346,8 @@ def build_parameter_summary(df):
 
 
 def build_top_quartile_ranges(df):
-    cutoff = df["adaptive_return_pct"].quantile(0.75)
-    top = df[df["adaptive_return_pct"] >= cutoff].copy()
+    cutoff = df["adaptive_annualized_return_pct"].quantile(0.75)
+    top = df[df["adaptive_annualized_return_pct"] >= cutoff].copy()
     rows = []
     for col in PARAMETER_COLUMNS:
         if col not in top.columns:
@@ -404,9 +464,9 @@ def robustness_score(row, df):
     ]
     if nearby.empty:
         return np.nan, 0
-    positive_count = int((nearby["adaptive_return_pct"] > 0).sum())
-    median_return = float(nearby["adaptive_return_pct"].median())
-    best_return = float(row["adaptive_return_pct"])
+    positive_count = int((nearby["adaptive_annualized_return_pct"] > 0).sum())
+    median_return = float(nearby["adaptive_annualized_return_pct"].median())
+    best_return = float(row["adaptive_annualized_return_pct"])
     isolation_penalty = max(0.0, best_return - median_return)
     robust = median_return - isolation_penalty
     if positive_count <= 1:
@@ -432,7 +492,7 @@ def build_recommended_runs(df, best_row, top_ranges):
             "offset_months": 9,
             "pop_gen": "50/50 then 60/60",
             "ema_bounds": f"{short_min}-{short_max} / {long_min}-{long_max}",
-            "reason": "Retest the only positive adaptive-return zone with more GA convergence.",
+            "reason": "Retest the strongest annualized adaptive-return zone with more GA convergence.",
             "command": f"python scripts/backtest-ema-ga10-index.py --data-file {data_file} --lookback-years 2.5 --offset-months 9 --pop_ranges 50 60 --gen_ranges 50 60 --short-ema-bounds {short_min} {short_max} --long-ema-bounds {long_min} {long_max}",
         },
         {
@@ -537,20 +597,20 @@ def save_scatter(df, x, y, color, title, path, xlabel=None, ylabel=None):
 
 
 def save_top_runs_chart(df, path):
-    plot_df = df.sort_values("adaptive_return_pct", ascending=False).head(8).copy()
+    plot_df = df.sort_values("adaptive_annualized_return_pct", ascending=False).head(8).copy()
     labels = [
         f"{row.lookback_years:g}Y/{int(row.offset_months)}M"
         for row in plot_df.itertuples()
     ]
     x = np.arange(len(plot_df))
     fig, ax = plt.subplots(figsize=(10, 5.5))
-    ax.bar(x - 0.18, plot_df["adaptive_return_pct"], width=0.36, label="Adaptive", color="#0f766e")
-    ax.bar(x + 0.18, plot_df["buy_hold_return_pct"], width=0.36, label="Buy & hold", color="#64748b")
+    ax.bar(x - 0.18, plot_df["adaptive_annualized_return_pct"], width=0.36, label="Adaptive annualized", color="#0f766e")
+    ax.bar(x + 0.18, plot_df["buy_hold_annualized_return_pct"], width=0.36, label="Buy & hold annualized", color="#64748b")
     ax.axhline(0, color="#111827", linewidth=0.8)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha="right")
-    ax.set_ylabel("Return (%)")
-    ax.set_title("Top Adaptive Runs vs Buy-and-Hold")
+    ax.set_ylabel("Annualized return (%)")
+    ax.set_title("Top Adaptive Runs vs Buy-and-Hold (Annualized)")
     ax.legend()
     ax.grid(True, axis="y", alpha=0.25)
     fig.tight_layout()
@@ -566,25 +626,25 @@ def create_charts(df, chart_dir):
         save_top_runs_chart(df, chart_dir / "strategy_top_runs_vs_buy_hold.png"),
         save_heatmap(
             df,
-            "adaptive_return_pct",
+            "adaptive_annualized_return_pct",
             "lookback_years",
             "offset_months",
-            "Adaptive Return by Lookback and Offset",
+            "Annualized Adaptive Return by Lookback and Offset",
             chart_dir / "strategy_lookback_offset_heatmap.png",
         ),
         save_heatmap(
             df,
-            "adaptive_return_pct",
+            "adaptive_annualized_return_pct",
             "best_ga_generations",
             "best_ga_pop_size",
-            "Adaptive Return by GA Population and Generations",
+            "Annualized Adaptive Return by GA Population and Generations",
             chart_dir / "strategy_pop_gen_heatmap.png",
         ),
         save_scatter(
             df,
             "last_short_ema",
             "last_long_ema",
-            "adaptive_return_pct",
+            "adaptive_annualized_return_pct",
             "EMA Pair Sensitivity",
             chart_dir / "strategy_ema_scatter.png",
             "Short EMA",
@@ -594,7 +654,7 @@ def create_charts(df, chart_dir):
             df,
             "last_rsi_oversold",
             "last_rsi_overbought",
-            "adaptive_return_pct",
+            "adaptive_annualized_return_pct",
             "RSI Guard Sensitivity",
             chart_dir / "strategy_rsi_scatter.png",
             "RSI Oversold",
@@ -604,7 +664,7 @@ def create_charts(df, chart_dir):
             df,
             "last_stop_loss",
             "last_drawdown_exit_pct",
-            "adaptive_return_pct",
+            "adaptive_annualized_return_pct",
             "Exit Rule Sensitivity",
             chart_dir / "strategy_exit_rules_scatter.png",
             "Stop Loss (%)",
@@ -672,12 +732,15 @@ def build_html_report(
     run_count = len(df)
     best_card = {
         "Fund": safe_text(best_row.get("fund_label", "")),
-        "Decision": "Best adaptive candidate, but not superior to buy-and-hold yet",
+        "Decision": "Best annualized adaptive candidate, but not superior to buy-and-hold yet",
         "Signal": log_parse.get("last_trade_signal", "unknown"),
         "Last signal date": log_parse.get("last_trade_date", ""),
-        "Adaptive return": pct(best_row.get("adaptive_return_pct")),
-        "Buy-and-hold return": pct(best_row.get("buy_hold_return_pct")),
-        "Excess return": pct(best_row.get("excess_return_pct")),
+        "Adaptive annualized": pct(best_row.get("adaptive_annualized_return_pct")),
+        "Buy-and-hold annualized": pct(best_row.get("buy_hold_annualized_return_pct")),
+        "Excess annualized": pct(best_row.get("excess_annualized_return_pct")),
+        "Adaptive total": pct(best_row.get("adaptive_return_pct")),
+        "Buy-and-hold total": pct(best_row.get("buy_hold_return_pct")),
+        "Excess total": pct(best_row.get("excess_return_pct")),
         "Sharpe": num(best_row.get("sharpe")),
         "Max drawdown": pct(best_row.get("max_dd_pct")),
         "Win rate": pct(best_row.get("win_rate_pct")),
@@ -707,8 +770,8 @@ def build_html_report(
         for k, v in param_card.items()
     )
 
-    top_adaptive = leaderboards[leaderboards["leaderboard"].eq("best_adaptive_return")]
-    top_excess = leaderboards[leaderboards["leaderboard"].eq("best_excess_return")]
+    top_adaptive = leaderboards[leaderboards["leaderboard"].eq("best_adaptive_annualized_return")]
+    top_excess = leaderboards[leaderboards["leaderboard"].eq("best_excess_annualized_return")]
     top_risk = leaderboards[leaderboards["leaderboard"].eq("best_risk_adjusted")]
 
     return f"""<!doctype html>
@@ -875,7 +938,7 @@ def build_html_report(
   <main>
     <section>
       <h2>Executive Decision</h2>
-      <p>The best adaptive run is the current decision candidate, but the strategy is not yet proven superior because its excess return versus buy-and-hold is still negative. Use it as a tuning lead, not as a final investment rule.</p>
+      <p>The best adaptive run is selected by annualized return so unequal backtest windows are compared on the same time basis. It remains a tuning lead unless annualized excess return versus buy-and-hold is positive after risk review.</p>
       <div class="cards">
         <div class="card">{cards_html}</div>
         <div class="card">{params_html}</div>
@@ -889,9 +952,9 @@ def build_html_report(
 
     <section>
       <h2>Leaderboards</h2>
-      <h3>Best Adaptive Return</h3>
+      <h3>Best Adaptive Annualized Return</h3>
       <div class="table-wrap">{dataframe_to_html(top_adaptive, 10)}</div>
-      <h3>Best Excess Return</h3>
+      <h3>Best Excess Annualized Return</h3>
       <div class="table-wrap">{dataframe_to_html(top_excess, 10)}</div>
       <h3>Best Risk-Adjusted</h3>
       <div class="table-wrap">{dataframe_to_html(top_risk, 10)}</div>
@@ -932,8 +995,8 @@ def build_markdown_report(
     log_parse,
     history_file,
 ):
-    top_adaptive = leaderboards[leaderboards["leaderboard"].eq("best_adaptive_return")]
-    top_excess = leaderboards[leaderboards["leaderboard"].eq("best_excess_return")]
+    top_adaptive = leaderboards[leaderboards["leaderboard"].eq("best_adaptive_annualized_return")]
+    top_excess = leaderboards[leaderboards["leaderboard"].eq("best_excess_annualized_return")]
     top_risk = leaderboards[leaderboards["leaderboard"].eq("best_risk_adjusted")]
     robust, nearby_count = robustness_score(best_row, df)
     lines = [
@@ -945,13 +1008,16 @@ def build_markdown_report(
         "",
         "## Executive Decision",
         "",
-        "Best adaptive candidate, but not superior to buy-and-hold yet.",
+        "Best annualized adaptive candidate. Use annualized excess return versus buy-and-hold as the apples-to-apples decision metric.",
         "",
         f"- Fund: `{safe_text(best_row.get('fund_label', ''))}`",
         f"- Current signal from best-run log: `{log_parse.get('last_trade_signal', 'unknown')}` on `{log_parse.get('last_trade_date', '')}`",
-        f"- Adaptive return: `{pct(best_row.get('adaptive_return_pct'))}`",
-        f"- Buy-and-hold return: `{pct(best_row.get('buy_hold_return_pct'))}`",
-        f"- Excess return: `{pct(best_row.get('excess_return_pct'))}`",
+        f"- Adaptive annualized return: `{pct(best_row.get('adaptive_annualized_return_pct'))}`",
+        f"- Buy-and-hold annualized return: `{pct(best_row.get('buy_hold_annualized_return_pct'))}`",
+        f"- Excess annualized return: `{pct(best_row.get('excess_annualized_return_pct'))}`",
+        f"- Adaptive total return: `{pct(best_row.get('adaptive_return_pct'))}`",
+        f"- Buy-and-hold total return: `{pct(best_row.get('buy_hold_return_pct'))}`",
+        f"- Excess total return: `{pct(best_row.get('excess_return_pct'))}`",
         f"- Sharpe: `{num(best_row.get('sharpe'))}`",
         f"- Max drawdown: `{pct(best_row.get('max_dd_pct'))}`",
         f"- Win rate: `{pct(best_row.get('win_rate_pct'))}`",
@@ -967,11 +1033,11 @@ def build_markdown_report(
         f"- Reentry rebound: `{pct(best_row.get('last_reentry_rebound_pct'))}`",
         f"- RSI oversold/overbought: `{num(best_row.get('last_rsi_oversold'), 0)} / {num(best_row.get('last_rsi_overbought'), 0)}`",
         "",
-        "## Best Adaptive Return",
+        "## Best Adaptive Annualized Return",
         "",
         dataframe_to_markdown(top_adaptive, 10),
         "",
-        "## Best Excess Return",
+        "## Best Excess Annualized Return",
         "",
         dataframe_to_markdown(top_excess, 10),
         "",
@@ -1013,7 +1079,7 @@ def main():
     if df.empty:
         raise ValueError("No completed, usable runs found in history file.")
 
-    best_row = df.sort_values(["adaptive_return_pct", "sharpe"], ascending=[False, False]).iloc[0]
+    best_row = df.sort_values(["adaptive_annualized_return_pct", "sharpe"], ascending=[False, False]).iloc[0]
     leaderboards = build_leaderboards(df, args.top_n)
     parameter_summary = build_parameter_summary(df)
     top_ranges = build_top_quartile_ranges(df)
@@ -1058,7 +1124,11 @@ def main():
     md_path.write_text(markdown_report, encoding="utf-8")
 
     print(f"Analyzed {len(df)} completed runs from {history_file}")
-    print(f"Best adaptive run: {safe_text(best_row.get('fund_label'))} {pct(best_row.get('adaptive_return_pct'))} adaptive, {pct(best_row.get('excess_return_pct'))} excess")
+    print(
+        f"Best adaptive run: {safe_text(best_row.get('fund_label'))} "
+        f"{pct(best_row.get('adaptive_annualized_return_pct'))} annualized adaptive, "
+        f"{pct(best_row.get('excess_annualized_return_pct'))} annualized excess"
+    )
     print(f"Current signal from best log: {log_parse.get('last_trade_signal')} {log_parse.get('last_trade_date')}")
     print(f"HTML report: {html_path}")
     print(f"Markdown report: {md_path}")
