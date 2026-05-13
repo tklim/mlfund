@@ -149,16 +149,19 @@ def download_fund(fund_id, years=3):
         if div and ex_date:
             div_list.append({"Date": ex_date, "Dividend": div})
 
-    # Merge dividends
+    # Merge dividends. Funds with no distributions still need a TotalReturn column;
+    # in that case TotalReturn is the same as NAV.
     if div_list:
         div_df = pd.DataFrame(div_list)
         div_df["Date"] = pd.to_datetime(div_df["Date"])
         df = df.merge(div_df, on="Date", how="left")
-        df["Dividend"] = df["Dividend"].fillna("")
+    else:
+        df["Dividend"] = 0.0
 
-        # Calculate TotalReturn: NAV + cumulative dividends received
-        df["DividendAmount"] = df["Dividend"].replace("", 0).astype(float)
-        df["TotalReturn"] = df["NAV"] + df["DividendAmount"].cumsum()
+    # Calculate TotalReturn: NAV + cumulative dividends received.
+    df["Dividend"] = pd.to_numeric(df["Dividend"], errors="coerce").fillna(0.0)
+    df["DividendAmount"] = df["Dividend"]
+    df["TotalReturn"] = df["NAV"] + df["DividendAmount"].cumsum()
 
     print(f"NAV Records: {len(df)}")
     print(
@@ -166,9 +169,7 @@ def download_fund(fund_id, years=3):
     )
 
     # Reorder columns
-    cols = ["Date", "NAV"]
-    if "Dividend" in df.columns:
-        cols.extend(["Dividend", "TotalReturn"])
+    cols = ["Date", "NAV", "Dividend", "TotalReturn"]
     df = df[cols]
 
     # Save CSV (handle locked files)

@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -74,5 +75,11 @@ def annualize_return_series(total_return_pct, start_series, end_series):
 def save_csv(df, path, **kwargs):
     path = Path(path)
     ensure_dir(path.parent)
-    df.to_csv(path, index=False, **kwargs)
-    return path
+    try:
+        df.to_csv(path, index=False, **kwargs)
+        return path
+    except PermissionError:
+        fallback = path.with_name(f"{path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{path.suffix}")
+        df.to_csv(fallback, index=False, **kwargs)
+        print(f"Warning: {path} is locked. Saved fallback CSV to {fallback}")
+        return fallback
