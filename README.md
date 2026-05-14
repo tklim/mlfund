@@ -152,6 +152,21 @@ Backtests still write global histories under `outputs/tunings/`, and also mirror
 python scripts/backfill_fund_outputs.py
 ```
 
+### Conditional Forward Probability Dashboard
+
+Generate a decision-support dashboard that compares each fund's latest state with similar historical states, then summarizes forward-return probabilities for BUY / HOLD / SELL review:
+
+```bash
+python scripts/fund_forward_decision.py --all --validate --charts
+```
+
+The default run analyzes `data/*_nav_5Y.csv`, uses `TotalReturn`, and applies a 6-month primary decision horizon with a `+15%` upside target and `-8%` downside-risk threshold. Outputs are saved to:
+
+- `outputs/reports/fund_forward_decision_dashboard.csv`
+- `outputs/reports/fund_forward_decision_details.csv`
+- `outputs/reports/fund_forward_decision_dashboard.html`
+- `outputs/charts/forward_decision/`
+
 ## Output
 
 CSV files are saved to the `data/` folder with the format:
