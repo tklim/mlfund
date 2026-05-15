@@ -8,6 +8,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import TwoSlopeNorm
 import numpy as np
 import pandas as pd
 
@@ -89,6 +90,11 @@ def parse_args():
         help="Directory for generated dashboard charts.",
     )
     parser.add_argument("--charts", action="store_true", help="Generate dashboard charts.")
+    parser.add_argument(
+        "--all-horizon-chart",
+        action="store_true",
+        help="Generate one combined decision-score heatmap across all configured horizons.",
+    )
     parser.add_argument(
         "--validate",
         action="store_true",
@@ -553,20 +559,121 @@ def build_html_report(dashboard, details, chart_paths, output_dir, args):
 """
 
 
-def create_charts(dashboard, details, chart_dir):
+def short_decision_label(decision_label):
+    if decision_label == "BUY":
+        return "BUY"
+    if decision_label == "SELL / AVOID":
+        return "SELL"
+    return "HOLD"
+
+
+def add_horizon_decisions(details):
+    rows = []
+    for _, row in details.iterrows():
+        decision_label, _ = decide(row)
+        out = row.copy()
+        out["Horizon Decision Label"] = decision_label
+        rows.append(out)
+    return pd.DataFrame(rows)
+
+
+def create_all_horizon_chart(details, chart_dir, horizon_order):
+    if details.empty:
+        return None
+
+    plot_df = add_horizon_decisions(details)
+    plot_df["Horizon"] = pd.Categorical(plot_df["Horizon"], categories=horizon_order, ordered=True)
+    score_matrix = plot_df.pivot(index="Fund Label", columns="Horizon", values="Decision Score")
+    label_matrix = plot_df.pivot(index="Fund Label", columns="Horizon", values="Horizon Decision Label")
+    score_matrix = score_matrix[[horizon for horizon in horizon_order if horizon in score_matrix.columns]]
+    label_matrix = label_matrix[score_matrix.columns]
+
+    fund_order = score_matrix.mean(axis=1).sort_values(ascending=False).index
+    score_matrix = score_matrix.loc[fund_order]
+    label_matrix = label_matrix.loc[fund_order]
+
+    finite_scores = score_matrix.to_numpy(dtype=float)
+    max_abs_score = np.nanmax(np.abs(finite_scores)) if np.isfinite(finite_scores).any() else 1.0
+    max_abs_score = max(max_abs_score, 0.1)
+    norm = TwoSlopeNorm(vmin=-max_abs_score, vcenter=0.0, vmax=max_abs_score)
+
+    fig_width = max(9.5, len(score_matrix.columns) * 2.25 + 4.5)
+    fig_height = max(5.5, len(score_matrix) * 0.46 + 2.2)
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    image = ax.imshow(score_matrix, cmap="RdYlGn", norm=norm, aspect="auto")
+
+    ax.set_title("Forward Decision Score Across Horizons", pad=20)
+    ax.set_xlabel("Forward decision horizon")
+    ax.set_ylabel("Fund")
+    ax.set_xticks(np.arange(len(score_matrix.columns)))
+    ax.set_xticklabels([f"{horizon} Horizon" for horizon in score_matrix.columns])
+    ax.set_yticks(np.arange(len(score_matrix.index)))
+    ax.set_yticklabels(score_matrix.index)
+    ax.tick_params(axis="x", top=True, bottom=False, labeltop=True, labelbottom=False)
+
+    for row_idx, fund_label in enumerate(score_matrix.index):
+        for col_idx, horizon in enumerate(score_matrix.columns):
+            score = score_matrix.loc[fund_label, horizon]
+            if pd.isna(score):
+                text = "n/a"
+                color = "#111827"
+            else:
+                action = short_decision_label(label_matrix.loc[fund_label, horizon])
+                text = f"{action}\n{score:+.2f}"
+                color = "#ffffff" if abs(score) > max_abs_score * 0.45 else "#111827"
+            ax.text(col_idx, row_idx, text, ha="center", va="center", fontsize=8, color=color)
+
+    ax.set_xticks(np.arange(-0.5, len(score_matrix.columns), 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(score_matrix.index), 1), minor=True)
+    ax.grid(which="minor", color="white", linestyle="-", linewidth=1.5)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    cbar = fig.colorbar(image, ax=ax, fraction=0.035, pad=0.02)
+    cbar.set_label("Decision Score (green = stronger buy setup)")
+    fig.tight_layout()
+
+    path = chart_dir / "forward_decision_score_all_horizons.png"
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return path
+
+
+def create_charts(
+    dashboard,
+    details,
+    chart_dir,
+    primary_horizon,
+    horizon_order,
+    include_primary_charts=True,
+    include_all_horizon_chart=False,
+):
     chart_dir.mkdir(parents=True, exist_ok=True)
     chart_paths = []
+    if include_all_horizon_chart:
+        all_horizon_path = create_all_horizon_chart(details, chart_dir, horizon_order)
+        if all_horizon_path:
+            chart_paths.append(all_horizon_path)
+    if not include_primary_charts:
+        return chart_paths
     if dashboard.empty:
         return chart_paths
 
     plot_df = dashboard.copy()
     plot_df = plot_df.sort_values("Decision Score", ascending=True)
-    fig, ax = plt.subplots(figsize=(10, max(4, len(plot_df) * 0.45)))
+    fig, ax = plt.subplots(figsize=(12.5, max(4.5, len(plot_df) * 0.48)))
     color_map = {"BUY": "#047857", "HOLD / WATCH": "#b45309", "SELL / AVOID": "#b91c1c"}
     colors = plot_df["Decision Label"].map(color_map).fillna("#64748b")
     ax.barh(plot_df["Fund Label"], plot_df["Decision Score"], color=colors)
+    score_min = plot_df["Decision Score"].min()
+    score_max = plot_df["Decision Score"].max()
+    raw_span = max(score_max - score_min, 0.1)
+    left_limit = min(score_min - raw_span * 0.18, -0.02)
+    longest_label_chars = max(len(f'{row["Decision Label"]} {row["Decision Score"]:+.2f}') for _, row in plot_df.iterrows())
+    label_space = raw_span * max(0.40, longest_label_chars * 0.025)
+    right_limit = max(score_max + label_space, 0 + label_space, 0.04)
+    ax.set_xlim(left_limit, right_limit)
     ax.axvline(0, color="#111827", linewidth=0.8)
-    ax.set_title("Forward Decision Score by Fund", pad=22)
+    ax.set_title(f"Forward Decision Score by Fund ({primary_horizon} Horizon)", pad=22)
     ax.set_xlabel("Decision Score (right/positive = stronger buy setup)")
     xmin, xmax = ax.get_xlim()
     x_span = xmax - xmin
@@ -614,7 +721,7 @@ def create_charts(dashboard, details, chart_dir):
     plt.close(fig)
     chart_paths.append(path)
 
-    detail_plot = details[details["Horizon"].eq("6M")].copy()
+    detail_plot = details[details["Horizon"].eq(primary_horizon)].copy()
     if not detail_plot.empty:
         fig, ax = plt.subplots(figsize=(10, max(4, len(detail_plot) * 0.45)))
         y = np.arange(len(detail_plot))
@@ -624,12 +731,13 @@ def create_charts(dashboard, details, chart_dir):
         ax.set_yticks(y)
         ax.set_yticklabels(detail_plot["Fund Label"])
         ax.set_xlim(0, 1)
-        ax.set_title("6M Upside vs Downside Analog Probability")
+        ax.set_title(f"{primary_horizon} Upside vs Downside Analog Probability")
         ax.set_xlabel("Probability")
         ax.legend()
         ax.grid(True, axis="x", alpha=0.25)
         fig.tight_layout()
-        path = chart_dir / "forward_decision_6m_upside_downside.png"
+        horizon_slug = str(primary_horizon).lower().replace(" ", "_")
+        path = chart_dir / f"forward_decision_{horizon_slug}_upside_downside.png"
         fig.savefig(path, dpi=160)
         plt.close(fig)
         chart_paths.append(path)
@@ -718,7 +826,19 @@ def main():
     dashboard_df = dashboard_df.drop(columns=["Action Rank"], errors="ignore")
     detail_df = detail_df.sort_values(["Fund Label", "Horizon"]).reset_index(drop=True)
 
-    chart_paths = create_charts(dashboard_df, detail_df, chart_dir) if args.charts else []
+    chart_paths = (
+        create_charts(
+            dashboard_df,
+            detail_df,
+            chart_dir,
+            args.primary_horizon,
+            list(horizons.keys()),
+            include_primary_charts=args.charts,
+            include_all_horizon_chart=args.all_horizon_chart,
+        )
+        if args.charts or args.all_horizon_chart
+        else []
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     dashboard_path = save_csv(dashboard_df, output_dir / "fund_forward_decision_dashboard.csv")
     details_path = save_csv(detail_df, output_dir / "fund_forward_decision_details.csv")

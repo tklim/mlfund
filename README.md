@@ -167,6 +167,12 @@ The default run analyzes `data/*_nav_5Y.csv`, uses `TotalReturn`, and applies a 
 - `outputs/reports/fund_forward_decision_dashboard.html`
 - `outputs/charts/forward_decision/`
 
+To compare every configured horizon in one visual, add:
+
+```bash
+python scripts/fund_forward_decision.py --all --all-horizon-chart --validate
+```
+
 ## Output
 
 CSV files are saved to the `data/` folder with the format:
