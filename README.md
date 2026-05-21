@@ -173,6 +173,46 @@ To compare every configured horizon in one visual, add:
 python scripts/fund_forward_decision.py --all --all-horizon-chart --validate
 ```
 
+### Daily Investment Decision Pipeline
+
+Run the daily investment review to refresh 5Y fund data, analyze the exact refreshed CSV files, and publish the decision dashboard:
+
+```powershell
+.\run_daily_investment_review.ps1
+```
+
+For a safe local dry run that skips downloading and uses the latest existing local 5Y CSVs:
+
+```powershell
+.\run_daily_investment_review.ps1 -SkipDownload
+```
+
+The daily pipeline writes:
+
+- `outputs/reports/fund_forward_decision_dashboard.html`
+- `outputs/reports/fund_forward_decision_dashboard.csv`
+- `outputs/reports/fund_forward_decision_details.csv`
+- `outputs/charts/forward_decision/`
+- dated logs and compact summaries under `outputs/reports/daily/`
+
+Daily runs use a 6M headline decision horizon and include the all-horizon heatmap for 1M/3M/6M/1Y context. Keep slower GA/backtest strategy refreshes on a weekly cadence:
+
+```powershell
+.\run_weekly_strategy_review.ps1
+```
+
+To refresh only the strategy review from existing backtest history:
+
+```powershell
+.\run_weekly_strategy_review.ps1 -SkipBacktest
+```
+
+To also regenerate final fixed-parameter backtest charts:
+
+```powershell
+.\run_weekly_strategy_review.ps1 -RunFinalBacktest
+```
+
 ## Output
 
 CSV files are saved to the `data/` folder with the format:
@@ -251,12 +291,12 @@ mlfund/
 ### Windows Task Scheduler
 Create a scheduled task to run daily:
 ```bash
-schtasks /create /tn "ManulifeFundDownload" /tr "python C:\Users\tklim\OpenWork\mlfund\scripts\download_fund.py" /sc daily /st 18:00
+schtasks /create /tn "MLFundDailyInvestmentReview" /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\tklim\OpenWork\mlfund\run_daily_investment_review.ps1" /sc daily /st 19:00
 ```
 
 ### Cron (Linux/Mac)
 ```bash
-0 18 * * * cd /path/to/mlfund && python scripts/download_fund.py
+0 19 * * * cd /path/to/mlfund && python scripts/daily_investment_review.py
 ```
 
 ## Notes

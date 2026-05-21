@@ -57,6 +57,12 @@ def parse_args():
         help="CSV file to analyze when --all is not used. Relative paths resolve from repo root.",
     )
     parser.add_argument(
+        "--data-files",
+        nargs="+",
+        default=None,
+        help="Explicit CSV files to analyze. Overrides --all and --data-file.",
+    )
+    parser.add_argument(
         "--all",
         action="store_true",
         help="Analyze every local fund CSV matching --fund-glob.",
@@ -747,7 +753,13 @@ def create_charts(
 
 def validate_outputs(dashboard, details, analogs, horizons, args):
     errors = []
-    if args.all:
+    if args.data_files:
+        expected_funds = {fund_label_from_data_file(resolve_repo_path(path)) for path in args.data_files}
+        actual_funds = set(dashboard["Fund Label"]) if "Fund Label" in dashboard.columns else set()
+        missing = sorted(expected_funds - actual_funds)
+        if missing:
+            errors.append(f"Dashboard is missing explicit data-file rows: {missing}")
+    elif args.all:
         expected_funds = {fund_label_from_data_file(path) for path in DATA_DIR.glob(args.fund_glob)}
         actual_funds = set(dashboard["Fund Label"]) if "Fund Label" in dashboard.columns else set()
         missing = sorted(expected_funds - actual_funds)
@@ -796,7 +808,12 @@ def main():
     if args.max_analogs < args.min_analogs:
         raise ValueError("--max-analogs must be greater than or equal to --min-analogs.")
 
-    if args.all:
+    if args.data_files:
+        csv_paths = [resolve_repo_path(path) for path in args.data_files]
+        missing_paths = [path for path in csv_paths if not path.exists()]
+        if missing_paths:
+            raise FileNotFoundError(f"CSV file(s) not found: {missing_paths}")
+    elif args.all:
         csv_paths = sorted(DATA_DIR.glob(args.fund_glob))
         if not csv_paths:
             raise FileNotFoundError(f"No files matched data/{args.fund_glob}")
