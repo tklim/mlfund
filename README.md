@@ -6,7 +6,7 @@ Automated NAV (Net Asset Value) and dividend data downloader for Manulife Invest
 
 - ✅ Download NAV history from Manulife API (no browser required)
 - ✅ Fetch dividend data and merge with NAV history
-- ✅ Calculate **TotalReturn** = NAV + cumulative dividends received
+- ✅ Calculate a dividend-reinvested **TotalReturn** index
 - ✅ Handle locked CSV files (auto-timestamp fallback)
 - ✅ Support multiple funds tracking
 - ✅ Quick summary mode (no full download)
@@ -50,6 +50,72 @@ Downloads all funds in the `TRACKED_FUNDS` list.
 ## Backtesting
 
 The repo includes [backtest-ema-ga10-index.py](C:/Users/tklim/OpenWork/mlfund/scripts/backtest-ema-ga10-index.py), which reads fund CSV files from `data/` and uses `TotalReturn` as the default price series for backtesting.
+
+## Operational Pipeline
+
+Use [operate.py](C:/Users/tklim/OpenWork/mlfund/scripts/operate.py) for repeatable day-to-day operation. Defaults live in [operation.json](C:/Users/tklim/OpenWork/mlfund/config/operation.json), including tracked funds, 5Y data refreshes, `TotalReturn`, holding horizons, and decision thresholds.
+
+### Daily Refresh + Decision Brief
+
+```bash
+python scripts/operate.py daily
+```
+
+This downloads all configured funds, validates local CSV health, refreshes forward-decision/probability/strategy-review reports, regenerates final GA replay charts for all funds, and writes:
+
+- `outputs/reports/daily_decision_brief.html`
+- `outputs/reports/daily_decision_brief.md`
+- `outputs/reports/data_health.csv`
+- `outputs/reports/fund_strategy_best_by_fund.csv`
+- `outputs/reports/operation_run_history.csv`
+
+Preview without running anything:
+
+```bash
+python scripts/operate.py daily --dry-run
+```
+
+### Regenerate Reports From Existing Data
+
+```bash
+python scripts/operate.py report
+```
+
+This also runs the final fixed-parameter GA replay with `--top-funds 0`, so the simple and technical charts are regenerated for every fund with an available best GA history row.
+
+### Run Deeper GA Backtests
+
+```bash
+python scripts/operate.py deep-backtest
+```
+
+Run up to four independent deep-backtest sessions in parallel:
+
+```bash
+python scripts/operate.py deep-backtest --max-workers 4
+```
+
+After a deep backtest finishes, regenerate the decision reports:
+
+```bash
+python scripts/operate.py report
+```
+
+The strategy review selects the best GA strategy separately for each fund, preserving each fund's own signal, last GA trade date, lookback/offset, EMA pair, annualized return, excess return, Sharpe, and drawdown.
+
+### Check Current Output Status
+
+```bash
+python scripts/operate.py status
+```
+
+### Install Windows Scheduler
+
+```bash
+python scripts/operate.py install-scheduler --task-name ManulifeFundDaily --time 18:30
+```
+
+Windows Task Scheduler uses the machine's local time. On this workstation, that is intended to be Malaysia local time.
 
 ### Backtest All Local Fund CSVs
 
@@ -164,14 +230,15 @@ CSV files are saved to the `data/` folder with the format:
 | `Date` | Trading date |
 | `NAV` | Net Asset Value (MYR) |
 | `Dividend` | Dividend paid on ex-dividend date (empty if no dividend) |
-| `TotalReturn` | NAV + cumulative dividends received to date |
+| `TotalReturn` | Price-like growth index with dividends reinvested on each ex-dividend date |
 
 ## TotalReturn Calculation
 
-The **TotalReturn** column represents the total value if you held the fund, including reinvested dividends:
+The **TotalReturn** column is anchored to the first NAV and compounds each distribution as though it were immediately reinvested at the ex-dividend-date NAV:
 
 ```
-TotalReturn = NAV + Σ(Dividends received to date)
+TotalReturn[0] = NAV[0]
+TotalReturn[t] = TotalReturn[t-1] × (NAV[t] + Dividend[t]) / NAV[t-1]
 ```
 
 **Example:**
@@ -179,9 +246,9 @@ TotalReturn = NAV + Σ(Dividends received to date)
 |------|-----|----------|-------------|
 | 2024-07-26 | 0.4064 | - | 0.4064 |
 | 2024-07-29 | 0.3736 | 0.0365 | **0.4101** |
-| 2024-07-30 | 0.3724 | - | 0.4089 |
+| 2024-07-30 | 0.3724 | - | 0.4088 |
 
-On 2024-07-29, the NAV dropped from 0.4064 to 0.3736 (dividend detached), but you received 0.0365 in cash. Total value = 0.3736 + 0.0365 = **0.4101**.
+On 2024-07-29, the NAV dropped when the 0.0365 distribution detached. The daily total-return factor is `(0.3736 + 0.0365) / 0.4064`, preserving the distribution's value and reinvesting it for subsequent periods.
 
 ## Tracked Funds
 

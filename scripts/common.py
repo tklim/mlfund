@@ -72,6 +72,33 @@ def annualize_return_series(total_return_pct, start_series, end_series):
     return annualized
 
 
+def dividend_reinvested_index(nav_values, dividend_values):
+    """Build a price-like total-return index with distributions reinvested.
+
+    The first observation is anchored to its NAV. Each later observation grows
+    by ``(NAV_t + Dividend_t) / NAV_(t-1)``, which assumes the distribution on
+    the ex-dividend date is immediately reinvested at that date's NAV.
+    """
+    nav = pd.to_numeric(pd.Series(nav_values), errors="coerce").astype(float)
+    dividends = pd.to_numeric(pd.Series(dividend_values), errors="coerce").fillna(0.0).astype(float)
+
+    if len(nav) != len(dividends):
+        raise ValueError("NAV and dividend series must have the same length.")
+    if nav.empty:
+        return pd.Series(dtype=float, index=nav.index, name="TotalReturn")
+    if (~np.isfinite(nav)).any() or (nav <= 0).any():
+        raise ValueError("NAV values must all be finite and greater than zero.")
+    if (~np.isfinite(dividends)).any() or (dividends < 0).any():
+        raise ValueError("Dividend values must all be finite and non-negative.")
+
+    growth_factors = (nav + dividends) / nav.shift(1)
+    growth_factors.iloc[0] = 1.0
+    total_return = nav.iloc[0] * growth_factors.cumprod()
+    total_return.index = getattr(nav_values, "index", nav.index)
+    total_return.name = "TotalReturn"
+    return total_return
+
+
 def save_csv(df, path, **kwargs):
     path = Path(path)
     ensure_dir(path.parent)

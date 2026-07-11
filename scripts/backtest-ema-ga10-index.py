@@ -6,6 +6,7 @@ from datetime import datetime
 import hashlib
 import random
 import warnings
+from contextlib import contextmanager
 warnings.filterwarnings('ignore')
 import signal
 import sys
@@ -19,6 +20,8 @@ import json
 import platform
 import socket
 import time
+
+from common import fund_label_from_data_file
 
 try:
     import yfinance as yf
@@ -57,6 +60,9 @@ DEFAULT_RSI_OVERSOLD_BOUNDS = (10, 40)
 DEFAULT_RSI_OVERBOUGHT_BOUNDS = (60, 90)
 DEFAULT_RSI_PERIOD = 14
 LOCK_RETRY_SCHEDULE_SECONDS = [30, 60, 120]
+HISTORY_LOCK_TIMEOUT_SECONDS = 900
+HISTORY_LOCK_STALE_SECONDS = 1800
+HISTORY_LOCK_POLL_SECONDS = 1
 history_fallback_files = []
 skip_top5_refresh_for_run = False
 
@@ -471,6 +477,40 @@ def record_history_fallback(original_path, fallback_path):
         history_fallback_files.append(entry)
 
 
+@contextmanager
+def history_write_lock(purpose):
+    lock_path = TUNINGS_DIR / ".history_write.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    start = time.time()
+    fd = None
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"pid={os.getpid()} purpose={purpose} started={datetime.now().isoformat()}\n".encode("utf-8"))
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+                if age > HISTORY_LOCK_STALE_SECONDS:
+                    lock_path.unlink()
+                    safe_log(f"Removed stale history write lock: {lock_path}")
+                    continue
+            except FileNotFoundError:
+                continue
+            if time.time() - start > HISTORY_LOCK_TIMEOUT_SECONDS:
+                raise PermissionError(f"Timed out waiting for history write lock: {lock_path}")
+            time.sleep(HISTORY_LOCK_POLL_SECONDS)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def run_with_lock_resilience(path, writer, purpose):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -478,7 +518,8 @@ def run_with_lock_resilience(path, writer, purpose):
 
     for attempt_index, wait_seconds in enumerate(LOCK_RETRY_SCHEDULE_SECONDS, start=1):
         try:
-            writer(path)
+            with history_write_lock(purpose):
+                writer(path)
             return {
                 "path": str(path),
                 "used_fallback": False,
@@ -493,7 +534,8 @@ def run_with_lock_resilience(path, writer, purpose):
             time.sleep(wait_seconds)
 
     try:
-        writer(path)
+        with history_write_lock(purpose):
+            writer(path)
         return {
             "path": str(path),
             "used_fallback": False,
@@ -507,7 +549,8 @@ def run_with_lock_resilience(path, writer, purpose):
         f"{purpose} still locked after retries: {path}. "
         f"Writing fallback file instead: {fallback_path}"
     )
-    writer(fallback_path)
+    with history_write_lock(purpose):
+        writer(fallback_path)
     record_history_fallback(path, fallback_path)
     return {
         "path": str(fallback_path),
@@ -838,19 +881,13 @@ def infer_fund_output_label(csv_file):
     - MAKGCF_GreaterChina_nav_3Y.csv -> MAKGCF_GreaterChina
     """
     stem = Path(csv_file).stem
-    new_name_match = re.search(r"^([A-Za-z0-9]+)_([A-Za-z0-9]+)_nav_", stem, re.IGNORECASE)
-    if new_name_match:
-        fund_code = new_name_match.group(1).upper()
-        short_name = new_name_match.group(2)
-        return f"{fund_code}_{sanitize_label(short_name)}"
-
     legacy_match = re.search(r"manulife_([A-Za-z0-9]+)_nav_", stem, re.IGNORECASE)
     if legacy_match:
         fund_code = legacy_match.group(1).upper()
         short_name = FUND_CODE_TO_SHORT_NAME.get(fund_code, fund_code)
         return f"{fund_code}_{sanitize_label(short_name)}"
 
-    return sanitize_label(stem)
+    return fund_label_from_data_file(csv_file)
 
 
 def ensure_output_dirs():

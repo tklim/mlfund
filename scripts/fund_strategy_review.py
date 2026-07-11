@@ -2,11 +2,14 @@ import argparse
 import html
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from common import fund_label_from_data_file, sanitize_fund_label
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -97,6 +100,40 @@ PARAMETER_COLUMNS = [
     "win_rate_pct",
 ]
 
+BEST_BY_FUND_COLUMNS = [
+    "fund_label",
+    "ga_signal",
+    "last_trade_date",
+    "last_trade_price",
+    "adaptive_annualized_return_pct",
+    "buy_hold_annualized_return_pct",
+    "excess_annualized_return_pct",
+    "adaptive_return_pct",
+    "buy_hold_return_pct",
+    "excess_return_pct",
+    "sharpe",
+    "max_dd_pct",
+    "win_rate_pct",
+    "lookback_years",
+    "offset_months",
+    "best_ga_pop_size",
+    "best_ga_generations",
+    "last_short_ema",
+    "last_long_ema",
+    "last_stop_loss",
+    "last_drawdown_exit_pct",
+    "last_reentry_rebound_pct",
+    "last_rsi_oversold",
+    "last_rsi_overbought",
+    "backtest_start",
+    "backtest_end",
+    "run_started_at",
+    "run_completed_at",
+    "log_file",
+    "last_trade_line",
+    "decision_status",
+]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -132,9 +169,7 @@ def parse_args():
 
 
 def sanitize_fund_folder_name(fund_label):
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fund_label or "").strip())
-    cleaned = re.sub(r"_+", "_", cleaned).strip("._-")
-    return cleaned or "UnknownFund"
+    return sanitize_fund_label(fund_label)
 
 
 def fund_output_dirs(fund_label):
@@ -180,6 +215,14 @@ def load_history(history_file, fund_label=None):
 
     if "run_status" in df.columns:
         df = df[df["run_status"].astype(str).str.lower().eq("completed")].copy()
+
+    if "data_file" in df.columns:
+        df["fund_label"] = df.apply(
+            lambda row: fund_label_from_data_file(row.get("data_file"))
+            if str(row.get("data_file", "")).strip()
+            else row.get("fund_label", ""),
+            axis=1,
+        )
 
     if fund_label:
         if "fund_label" not in df.columns:
@@ -364,6 +407,42 @@ def build_top_quartile_ranges(df):
             }
         )
     return pd.DataFrame(rows)
+
+
+def build_best_by_fund(df):
+    if "fund_label" not in df.columns or df.empty:
+        return pd.DataFrame(columns=BEST_BY_FUND_COLUMNS)
+
+    sort_cols = [
+        col
+        for col in [
+            "adaptive_annualized_return_pct",
+            "sharpe",
+            "excess_annualized_return_pct",
+            "adaptive_return_pct",
+        ]
+        if col in df.columns
+    ]
+    if not sort_cols:
+        return pd.DataFrame(columns=BEST_BY_FUND_COLUMNS)
+
+    rows = []
+    for fund_label, fund_df in df.groupby("fund_label", dropna=False):
+        best_row = fund_df.sort_values(sort_cols, ascending=[False] * len(sort_cols)).iloc[0]
+        parsed = parse_log_metrics(best_row.get("log_file", ""))
+        row = {col: best_row.get(col, "") for col in BEST_BY_FUND_COLUMNS}
+        row["fund_label"] = fund_label
+        row["ga_signal"] = parsed.get("last_trade_signal", "unknown")
+        row["last_trade_date"] = parsed.get("last_trade_date", "")
+        row["last_trade_price"] = parsed.get("last_trade_price", np.nan)
+        row["last_trade_line"] = parsed.get("last_trade_line", "")
+        rows.append(row)
+
+    best_by_fund = pd.DataFrame(rows)
+    return clipped_columns(best_by_fund, BEST_BY_FUND_COLUMNS).sort_values(
+        ["adaptive_annualized_return_pct", "sharpe"],
+        ascending=[False, False],
+    )
 
 
 def parse_log_metrics(log_file):
@@ -712,6 +791,7 @@ def rel_path(path, base):
 def build_html_report(
     df,
     best_row,
+    best_by_fund,
     leaderboards,
     parameter_summary,
     top_ranges,
@@ -722,6 +802,7 @@ def build_html_report(
     report_dir,
     history_file,
 ):
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     status_class = "status-red"
     if str(best_row["decision_status"]).startswith("green"):
         status_class = "status-green"
@@ -773,6 +854,23 @@ def build_html_report(
     top_adaptive = leaderboards[leaderboards["leaderboard"].eq("best_adaptive_annualized_return")]
     top_excess = leaderboards[leaderboards["leaderboard"].eq("best_excess_annualized_return")]
     top_risk = leaderboards[leaderboards["leaderboard"].eq("best_risk_adjusted")]
+    best_by_fund_display = clipped_columns(
+        best_by_fund,
+        [
+            "fund_label",
+            "ga_signal",
+            "last_trade_date",
+            "adaptive_annualized_return_pct",
+            "excess_annualized_return_pct",
+            "sharpe",
+            "max_dd_pct",
+            "lookback_years",
+            "offset_months",
+            "last_short_ema",
+            "last_long_ema",
+            "decision_status",
+        ],
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -929,6 +1027,7 @@ def build_html_report(
   <header>
     <h1>Fund Strategy Review</h1>
     <div class="meta">
+      <span>Generated: {html.escape(generated_at)}</span>
       <span>Source: {html.escape(str(history_file))}</span>
       <span>Completed runs: {run_count}</span>
       <span>Funds: {fund_count}</span>
@@ -952,6 +1051,8 @@ def build_html_report(
 
     <section>
       <h2>Leaderboards</h2>
+      <h3>Best GA Strategy By Fund</h3>
+      <div class="table-wrap">{dataframe_to_html(best_by_fund_display, 30)}</div>
       <h3>Best Adaptive Annualized Return</h3>
       <div class="table-wrap">{dataframe_to_html(top_adaptive, 10)}</div>
       <h3>Best Excess Annualized Return</h3>
@@ -987,6 +1088,7 @@ def build_html_report(
 def build_markdown_report(
     df,
     best_row,
+    best_by_fund,
     leaderboards,
     parameter_summary,
     top_ranges,
@@ -998,10 +1100,29 @@ def build_markdown_report(
     top_adaptive = leaderboards[leaderboards["leaderboard"].eq("best_adaptive_annualized_return")]
     top_excess = leaderboards[leaderboards["leaderboard"].eq("best_excess_annualized_return")]
     top_risk = leaderboards[leaderboards["leaderboard"].eq("best_risk_adjusted")]
+    best_by_fund_display = clipped_columns(
+        best_by_fund,
+        [
+            "fund_label",
+            "ga_signal",
+            "last_trade_date",
+            "adaptive_annualized_return_pct",
+            "excess_annualized_return_pct",
+            "sharpe",
+            "max_dd_pct",
+            "lookback_years",
+            "offset_months",
+            "last_short_ema",
+            "last_long_ema",
+            "decision_status",
+        ],
+    )
     robust, nearby_count = robustness_score(best_row, df)
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "# Fund Strategy Review",
         "",
+        f"Generated: `{generated_at}`",
         f"Source: `{history_file}`",
         f"Completed runs: `{len(df)}`",
         f"Funds: `{df['fund_label'].nunique() if 'fund_label' in df.columns else 0}`",
@@ -1032,6 +1153,10 @@ def build_markdown_report(
         f"- Drawdown exit: `{pct(best_row.get('last_drawdown_exit_pct'))}`",
         f"- Reentry rebound: `{pct(best_row.get('last_reentry_rebound_pct'))}`",
         f"- RSI oversold/overbought: `{num(best_row.get('last_rsi_oversold'), 0)} / {num(best_row.get('last_rsi_overbought'), 0)}`",
+        "",
+        "## Best GA Strategy By Fund",
+        "",
+        dataframe_to_markdown(best_by_fund_display, 30),
         "",
         "## Best Adaptive Annualized Return",
         "",
@@ -1080,6 +1205,7 @@ def main():
         raise ValueError("No completed, usable runs found in history file.")
 
     best_row = df.sort_values(["adaptive_annualized_return_pct", "sharpe"], ascending=[False, False]).iloc[0]
+    best_by_fund = build_best_by_fund(df)
     leaderboards = build_leaderboards(df, args.top_n)
     parameter_summary = build_parameter_summary(df)
     top_ranges = build_top_quartile_ranges(df)
@@ -1088,6 +1214,7 @@ def main():
     charts = create_charts(df, chart_dir)
 
     save_table(leaderboards, report_dir / "fund_strategy_leaderboards.csv")
+    save_table(best_by_fund, report_dir / "fund_strategy_best_by_fund.csv")
     save_table(parameter_summary, report_dir / "fund_strategy_parameter_summary.csv")
     save_table(top_ranges, report_dir / "fund_strategy_top_quartile_ranges.csv")
     save_table(recommended_runs, report_dir / "fund_strategy_recommended_next_runs.csv")
@@ -1096,6 +1223,7 @@ def main():
     html_report = build_html_report(
         df,
         best_row,
+        best_by_fund,
         leaderboards,
         parameter_summary,
         top_ranges,
@@ -1109,6 +1237,7 @@ def main():
     markdown_report = build_markdown_report(
         df,
         best_row,
+        best_by_fund,
         leaderboards,
         parameter_summary,
         top_ranges,
@@ -1129,6 +1258,7 @@ def main():
         f"{pct(best_row.get('adaptive_annualized_return_pct'))} annualized adaptive, "
         f"{pct(best_row.get('excess_annualized_return_pct'))} annualized excess"
     )
+    print(f"Best-by-fund strategy rows: {len(best_by_fund)}")
     print(f"Current signal from best log: {log_parse.get('last_trade_signal')} {log_parse.get('last_trade_date')}")
     print(f"HTML report: {html_path}")
     print(f"Markdown report: {md_path}")

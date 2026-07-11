@@ -12,6 +12,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from common import fund_label_from_data_file
+
+# DO NOT REMOVE: GOAL: To identify best performing result for each fund so that it can be used for future decision making. Review past tuning history results from backtest_run_history.csv, identify the best performing result (annualize excess) for each fund, capture the key info into ga_tuning_summary_XXXXXX.csv, and then generate final-simple*png and final-technical*png chart to visually display the best performer.
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -67,8 +71,8 @@ def parse_args():
     parser.add_argument(
         "--top-funds",
         type=int,
-        default=2,
-        help="Number of top funds to chart after ranking by adaptive annualized return. Use 0 for all funds (default: 2).",
+        default=0,
+        help="Number of top funds to chart after ranking by adaptive annualized return. Use 0 for all funds (default: 0, meaning all funds).",
     )
     return parser.parse_args()
 
@@ -227,9 +231,9 @@ def normalize_run_history(run_history_df):
 
 
 def data_prefix_from_path(path):
-    stem = Path(str(path)).stem
-    match = re.match(r"(.+)_nav_\d+Y$", stem, re.IGNORECASE)
-    return match.group(1) if match else None
+    if not str(path).strip():
+        return None
+    return fund_label_from_data_file(path)
 
 
 def select_best_run_rows(run_history_df, fund_label=None, top_funds=2):
@@ -247,7 +251,7 @@ def select_best_run_rows(run_history_df, fund_label=None, top_funds=2):
         run_history_df["run_started_at_sort"] = pd.NaT
 
     sorted_runs = run_history_df.sort_values(
-        ["source_adaptive_annualized_return_pct", "run_started_at_sort"],
+        ["source_excess_annualized_return_pct", "run_started_at_sort"],
         ascending=[False, False],
     )
     rank1 = sorted_runs.groupby("canonical_fund_label", sort=False, as_index=False).head(1).reset_index(drop=True)
@@ -262,21 +266,31 @@ def nav_years_from_path(path):
 
 
 def choose_data_file(row, data_file=None):
+    warning = None
+
     if data_file:
         path = Path(data_file)
         if not path.is_absolute():
             path = REPO_ROOT / path
-        return path
+        return path, warning
 
     fund_label = row["fund_label"]
     source_data_file = row.get("source_data_file", "")
-    if str(source_data_file).strip():
-        source_path = Path(str(source_data_file))
-        if source_path.exists():
-            return source_path
-        local_source_path = DATA_DIR / source_path.name
+    source_path = Path(str(source_data_file)) if str(source_data_file).strip() else None
+
+    if source_path and source_path.exists():
+        return source_path, warning
+
+    source_filename = source_path.name if source_path else None
+    if source_filename:
+        local_source_path = DATA_DIR / source_filename
         if local_source_path.exists():
-            return local_source_path
+            return local_source_path, warning
+
+    if source_path:
+        warning = f"Source data file not found: {source_path}. Trying to find matching file..."
+
+    source_years = nav_years_from_path(source_path) if source_path else -1
 
     candidates = sorted(DATA_DIR.glob(f"{fund_label}_nav_*Y.csv"))
     source_prefix = data_prefix_from_path(source_data_file) if str(source_data_file).strip() else None
@@ -284,9 +298,22 @@ def choose_data_file(row, data_file=None):
     if not candidates and source_prefix:
         candidates = sorted(DATA_DIR.glob(f"{source_prefix}_nav_*Y.csv"))
     if not candidates:
-        return None
+        return None, warning
 
-    return max(candidates, key=lambda path: (nav_years_from_path(path), path.stat().st_mtime))
+    if source_years > 0:
+        matching = [c for c in candidates if nav_years_from_path(c) == source_years]
+        if matching:
+            selected = max(matching, key=lambda p: p.stat().st_mtime)
+            if warning:
+                warning += f" Using {selected.name} (matching {source_years}Y)."
+            return selected, warning
+        else:
+            warning = f"No {source_years}Y file found. Available: {[c.name for c in candidates]}. Using closest match..."
+
+    selected = max(candidates, key=lambda path: (nav_years_from_path(path), path.stat().st_mtime))
+    if warning:
+        warning += f" Using {selected.name}."
+    return selected, warning
 
 
 def load_price_data(csv_path, price_column):
@@ -592,7 +619,9 @@ def output_label_for_data_file(data_file, fallback_label):
 
 def run_one_fund(row, args, run_timestamp):
     source_fund_label = row["fund_label"]
-    data_file = choose_data_file(row, args.data_file)
+    data_file, file_warning = choose_data_file(row, args.data_file)
+    if file_warning:
+        print(f"WARNING: {file_warning}")
     if data_file is None:
         message = f"Skipping {source_fund_label}: no matching data CSV found"
         print(message)
@@ -618,16 +647,44 @@ def run_one_fund(row, args, run_timestamp):
     log_path = LOGS_DIR / f"{fund_label}-final-bestparams-{formatted}.txt"
     technical_chart = CHARTS_DIR / f"{fund_label}-final-technical-{chart_stamp}.png"
     simple_chart = CHARTS_DIR / f"{fund_label}-final-simple-{chart_stamp}.png"
+    latest_chart = CHARTS_DIR / f"{fund_label}-final-latest-{chart_stamp}.png"
+
+    original_chart_file = row.get("chart_file", "")
+    use_original_chart = original_chart_file and Path(original_chart_file).exists()
 
     strategy_profile = row.get("strategy_profile", "generic")
     if pd.isna(strategy_profile):
         strategy_profile = "generic"
     price_column = args.price_column or row.get("price_column", "TotalReturn")
-    if pd.isna(price_column) or not str(price_column).strip():
+    if pd.notna(price_column) and str(price_column).strip():
+        pass
+    else:
         price_column = "TotalReturn"
 
     df = load_price_data(data_file, price_column)
+    df_full = df.copy()
+    backtest_start = row.get("backtest_start", "")
+    backtest_end = row.get("backtest_end", "")
+    if pd.notna(backtest_start) and str(backtest_start).strip():
+        start_date = pd.to_datetime(backtest_start)
+        df = df.loc[start_date:]
+    if pd.notna(backtest_end) and str(backtest_end).strip():
+        end_date = pd.to_datetime(backtest_end)
+        df = df.loc[:end_date]
+
     result = run_fixed_backtest(df, row, args.initial_capital, strategy_profile)
+
+    result_latest = run_fixed_backtest(df_full, row, args.initial_capital, strategy_profile)
+    df_result_latest, total_return_latest, num_trades_latest, trades_latest, win_rate_latest, _, _, _, _ = result_latest
+    buy_hold_series_latest, buy_hold_return_latest = build_buy_hold_series(df_result_latest, args.initial_capital)
+    metrics_latest = bt.calculate_index_strategy_metrics(
+        df_result_latest,
+        trades_latest,
+        initial_capital=args.initial_capital,
+        long_ema=safe_int(row, "long_ema"),
+    )
+    metrics_latest["buy_hold_return"] = buy_hold_return_latest
+    metrics_latest["excess_return"] = metrics_latest["adaptive_return"] - buy_hold_return_latest
     df_result, total_return, num_trades, trades, win_rate, avg_return, decisions_df, sharpe, max_dd = result
     buy_hold_series, buy_hold_return = build_buy_hold_series(df_result, args.initial_capital)
     metrics = bt.calculate_index_strategy_metrics(
@@ -652,26 +709,46 @@ def run_one_fund(row, args, run_timestamp):
     )
     excess_annualized = adaptive_annualized - buy_hold_annualized
 
-    plot_technical_chart(
-        fund_label,
-        df_result,
-        buy_hold_series,
-        buy_hold_return,
-        metrics,
-        row,
-        price_column,
-        args.initial_capital,
-        technical_chart,
-    )
-    plot_simple_chart(
-        fund_label,
-        df_result,
-        buy_hold_series,
-        buy_hold_return,
-        metrics,
-        args.initial_capital,
-        simple_chart,
-    )
+    if use_original_chart:
+        import shutil
+        shutil.copy(original_chart_file, technical_chart)
+        source_chart_name = Path(original_chart_file).name
+        source_chart_copy = CHARTS_DIR / f"{fund_label}-final-find-source-{source_chart_name}"
+        shutil.copy(original_chart_file, source_chart_copy)
+
+    if df_result is not None:
+        plot_technical_chart(
+            fund_label,
+            df_result,
+            buy_hold_series,
+            buy_hold_return,
+            metrics,
+            row,
+            price_column,
+            args.initial_capital,
+            technical_chart,
+        )
+        plot_simple_chart(
+            fund_label,
+            df_result,
+            buy_hold_series,
+            buy_hold_return,
+            metrics,
+            args.initial_capital,
+            simple_chart,
+        )
+        if df_result_latest is not None:
+            plot_technical_chart(
+                f"{fund_label} [Latest]",
+                df_result_latest,
+                buy_hold_series_latest,
+                buy_hold_return_latest,
+                metrics_latest,
+                row,
+                price_column,
+                args.initial_capital,
+                latest_chart,
+            )
 
     completed_at = datetime.now()
     duration_seconds = int((completed_at - started_at).total_seconds())
@@ -680,6 +757,7 @@ def run_one_fund(row, args, run_timestamp):
         f"Fund: {fund_label}",
         f"Source run-history fund label: {source_fund_label}",
         f"Data file: {data_file}",
+        f"Data file warning: {file_warning}" if file_warning else "Data file warning: (none)",
         f"Price column: {price_column}",
         f"Source run ID: {row.get('source_run_id', '')}",
         f"Source adaptive return: {safe_float(row, 'source_adaptive_return_pct', 0.0):.2f}%",
@@ -713,16 +791,29 @@ def run_one_fund(row, args, run_timestamp):
         f"Simple chart: {simple_chart}",
     ]
     write_log(log_path, log_lines)
-    print(
-        f"{fund_label}: source_adaptive={safe_float(row, 'source_adaptive_return_pct', 0.0):.2f}%, "
-        f"source_ann={safe_float(row, 'source_adaptive_annualized_return_pct', 0.0):.2f}%, "
-        f"replay_strategy={metrics['adaptive_return']:.2f}%, "
-        f"replay_ann={adaptive_annualized:.2f}%, "
-        f"buy_hold={buy_hold_return:.2f}%, excess={metrics['excess_return']:.2f}%"
-    )
+    run_id = f"{run_timestamp}_{fund_label}"
+    source_run_id = row.get("source_run_id", "n/a")
+    source_adaptive = safe_float(row, "source_adaptive_return_pct", 0.0)
+    source_buy_hold = safe_float(row, "source_buy_hold_return_pct", 0.0)
+    source_excess = safe_float(row, "source_excess_return_pct", 0.0)
+    source_chart_file = row.get("chart_file", "")
+    source_chart_name = Path(source_chart_file).name if source_chart_file else "N/A"
+    print()
+    print(f"=" * 60)
+    print(f"Run ID: {run_id}")
+    print(f"Source Run ID: {source_run_id}")
+    print(f"Source Data File: {row.get('source_data_file', 'N/A')}")
+    print(f"Source Chart File: {source_chart_name}")
+    print(f"Fund: {fund_label}")
+    print(f"  Source -> Adaptive: {source_adaptive:>7.2f}%  |  Buy & Hold: {source_buy_hold:>7.2f}%  |  Excess: {source_excess:>7.2f}%")
+    print(f"  Final  -> Adaptive: {metrics['adaptive_return']:>7.2f}%  |  Buy & Hold: {buy_hold_return:>7.2f}%  |  Excess: {metrics['excess_return']:>7.2f}%")
+    print(f"  Latest -> Adaptive: {metrics_latest['adaptive_return']:>7.2f}%  |  Buy & Hold: {buy_hold_return_latest:>7.2f}%  |  Excess: {metrics_latest['excess_return']:>7.2f}%")
+    print(f"  Trades: {num_trades}  |  Win Rate: {win_rate:.1f}%  |  Sharpe: {metrics['sharpe']:.3f}")
+    print(f"  Charts: {technical_chart.name}, {simple_chart.name}, {latest_chart.name}")
+    print(f"=" * 60)
 
     return {
-        "run_id": f"{run_timestamp}_{fund_label}",
+        "run_id": run_id,
         "status": "completed",
         "fund_label": fund_label,
         "source_fund_label": source_fund_label,
@@ -795,7 +886,7 @@ def main():
     if not args.fund_label and args.top_funds and args.top_funds > 0:
         print(
             f"Generating final charts for top {len(selected_rows)} fund(s) "
-            "ranked by historical adaptive annualized return. Use --top-funds 0 to run all."
+            "ranked by historical adaptive annualized return."
         )
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 

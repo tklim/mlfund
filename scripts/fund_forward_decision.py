@@ -1,6 +1,7 @@
 import argparse
 import html
 import os
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -387,6 +388,7 @@ def dataframe_to_html(df, columns, max_rows=100):
 
 
 def build_html_report(dashboard, details, chart_paths, output_dir, args):
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     action_counts = dashboard["Decision Label"].value_counts().to_dict() if "Decision Label" in dashboard.columns else {}
     summary_bits = " | ".join(f"{html.escape(action)}: {count}" for action, count in action_counts.items())
     dashboard_columns = [
@@ -537,7 +539,7 @@ def build_html_report(dashboard, details, chart_paths, output_dir, args):
 <body>
   <header>
     <h1>Conditional Forward Probability Decision Dashboard</h1>
-    <div class="meta">Primary horizon: {html.escape(args.primary_horizon)} | Upside target: {args.upside_target:+.0%} | Downside risk: {args.downside_risk:.0%} | {summary_bits}</div>
+    <div class="meta">Generated: {html.escape(generated_at)} | Primary horizon: {html.escape(args.primary_horizon)} | Upside target: {args.upside_target:+.0%} | Downside risk: {args.downside_risk:.0%} | {summary_bits}</div>
   </header>
   <main>
     <p>This dashboard compares today's fund state with similar historical states in the same fund, then summarizes what happened over the forward horizon. It is decision support, not a guarantee.</p>

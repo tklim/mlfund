@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from common import sanitize_fund_label
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -20,9 +22,7 @@ GLOBAL_FILES = {
 
 
 def sanitize_fund_folder_name(fund_label):
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fund_label or "").strip())
-    cleaned = re.sub(r"_+", "_", cleaned).strip("._-")
-    return cleaned or "UnknownFund"
+    return sanitize_fund_label(fund_label)
 
 
 def fund_tuning_dir(fund_label):
