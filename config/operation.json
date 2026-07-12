@@ -1,0 +1,49 @@
+{
+  "tracked_funds": [
+    "MAUS_RMH",
+    "MGPRH",
+    "MIIEH",
+    "MAPF",
+    "MGLVH",
+    "MAKGCF",
+    "HWFL",
+    "MAPAC",
+    "APCR",
+    "MSGLR_RM"
+  ],
+  "default_years": 5,
+  "fund_glob": "*_nav_5Y.csv",
+  "price_column": "TotalReturn",
+  "date_column": "Date",
+  "horizons": ["1M:21", "3M:63", "6M:126", "1Y:252"],
+  "primary_horizon": "6M",
+  "upside_target": 0.15,
+  "downside_risk": -0.08,
+  "stale_after_days": 10,
+  "forward_decision": {
+    "min_independent_analogs": 6,
+    "max_independent_analogs": 20
+  },
+  "schedule": {
+    "task_name": "ManulifeFundDaily",
+    "time": "18:30"
+  },
+  "backtest": {
+    "lookback_years": [1, 2, 3],
+    "offset_months": [3, 6, 9, 12],
+    "population": 10,
+    "generations": 10,
+    "ga_search_preset": "focused"
+  },
+  "final_backtest": {
+    "top_funds": 0
+  },
+  "reports": {
+    "report_dir": "outputs/reports",
+    "chart_dir": "outputs/charts",
+    "decision_brief_md": "outputs/reports/daily_decision_brief.md",
+    "decision_brief_html": "outputs/reports/daily_decision_brief.html",
+    "data_health": "outputs/reports/data_health.csv",
+    "operation_history": "outputs/reports/operation_run_history.csv"
+  }
+}
