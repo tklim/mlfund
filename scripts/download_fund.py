@@ -15,6 +15,8 @@ import pandas as pd
 import requests
 from requests import RequestException
 
+from common import REINVESTED_TOTAL_RETURN_METHOD, TOTAL_RETURN_METHOD_COLUMN
+
 # Configuration
 BASE_URL = "https://www.manulifeim.com.my/funds/fund-details/_jcr_content/root/responsivegrid_641029165"
 HEADERS = {
@@ -94,6 +96,57 @@ def get_dividends(fund_id):
     return response if isinstance(response, list) else []
 
 
+def build_total_return_frame(nav_df, dividend_df=None):
+    """Align distributions to NAV dates and build a reinvested return index."""
+    frame = nav_df.copy()
+    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+    frame["NAV"] = pd.to_numeric(frame["NAV"], errors="coerce")
+    frame = (
+        frame.dropna(subset=["Date", "NAV"])
+        .drop_duplicates(subset=["Date"], keep="last")
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+    if frame.empty:
+        raise ValueError("No valid NAV rows are available to build TotalReturn.")
+    if (frame["NAV"] <= 0).any():
+        raise ValueError("NAV values must be positive to build TotalReturn.")
+
+    frame["Dividend"] = 0.0
+    if dividend_df is not None and not dividend_df.empty:
+        distributions = dividend_df[["Date", "Dividend"]].copy()
+        distributions["Date"] = pd.to_datetime(distributions["Date"], errors="coerce")
+        distributions["Dividend"] = pd.to_numeric(distributions["Dividend"], errors="coerce")
+        distributions = distributions.dropna(subset=["Date", "Dividend"])
+        distributions = distributions[
+            distributions["Date"].between(frame["Date"].min(), frame["Date"].max())
+        ].sort_values("Date")
+
+        if not distributions.empty:
+            nav_dates = frame[["Date"]].rename(columns={"Date": "NAVDate"})
+            aligned = pd.merge_asof(
+                distributions,
+                nav_dates,
+                left_on="Date",
+                right_on="NAVDate",
+                direction="forward",
+            ).dropna(subset=["NAVDate"])
+            aligned = (
+                aligned.groupby("NAVDate", as_index=False)["Dividend"]
+                .sum()
+                .rename(columns={"NAVDate": "Date", "Dividend": "AlignedDividend"})
+            )
+            frame = frame.merge(aligned, on="Date", how="left")
+            frame["Dividend"] = frame.pop("AlignedDividend").fillna(0.0)
+
+    reinvestment_factor = 1 + (frame["Dividend"] / frame["NAV"])
+    if (reinvestment_factor <= 0).any():
+        raise ValueError("Dividend adjustment produced a non-positive reinvestment factor.")
+    frame["TotalReturn"] = frame["NAV"] * reinvestment_factor.cumprod()
+    frame[TOTAL_RETURN_METHOD_COLUMN] = REINVESTED_TOTAL_RETURN_METHOD
+    return frame[["Date", "NAV", "Dividend", "TotalReturn", TOTAL_RETURN_METHOD_COLUMN]]
+
+
 def download_fund(fund_id, years=3):
     """Download NAV history and dividends for a fund."""
     print(f"\n{'=' * 50}")
@@ -149,19 +202,8 @@ def download_fund(fund_id, years=3):
         if div and ex_date:
             div_list.append({"Date": ex_date, "Dividend": div})
 
-    # Merge dividends. Funds with no distributions still need a TotalReturn column;
-    # in that case TotalReturn is the same as NAV.
-    if div_list:
-        div_df = pd.DataFrame(div_list)
-        div_df["Date"] = pd.to_datetime(div_df["Date"])
-        df = df.merge(div_df, on="Date", how="left")
-    else:
-        df["Dividend"] = 0.0
-
-    # Calculate TotalReturn: NAV + cumulative dividends received.
-    df["Dividend"] = pd.to_numeric(df["Dividend"], errors="coerce").fillna(0.0)
-    df["DividendAmount"] = df["Dividend"]
-    df["TotalReturn"] = df["NAV"] + df["DividendAmount"].cumsum()
+    div_df = pd.DataFrame(div_list, columns=["Date", "Dividend"])
+    df = build_total_return_frame(df, div_df)
 
     print(f"NAV Records: {len(df)}")
     print(
@@ -169,7 +211,7 @@ def download_fund(fund_id, years=3):
     )
 
     # Reorder columns
-    cols = ["Date", "NAV", "Dividend", "TotalReturn"]
+    cols = ["Date", "NAV", "Dividend", "TotalReturn", TOTAL_RETURN_METHOD_COLUMN]
     df = df[cols]
 
     # Save CSV (handle locked files)
@@ -200,6 +242,7 @@ def download_fund(fund_id, years=3):
         "change": change,
         "change_pct": change_pct,
         "dividend_count": len(dividends),
+        "total_return_method": REINVESTED_TOTAL_RETURN_METHOD,
         "records": len(df),
         "output_path": str(out_path),
     }

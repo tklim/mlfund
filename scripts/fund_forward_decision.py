@@ -12,7 +12,15 @@ from matplotlib.colors import TwoSlopeNorm
 import numpy as np
 import pandas as pd
 
-from common import CHARTS_DIR, DATA_DIR, REPORTS_DIR, fund_label_from_data_file, resolve_repo_path, save_csv
+from common import (
+    CHARTS_DIR,
+    DATA_DIR,
+    REPORTS_DIR,
+    calculate_rsi,
+    fund_label_from_data_file,
+    resolve_repo_path,
+    save_csv,
+)
 from fund_probability_analysis import (
     calculate_calendar_forward_return_frame,
     expected_shortfall,
@@ -111,17 +119,6 @@ def parse_args():
 
 def calculate_ema(series, period):
     return series.ewm(span=period, adjust=False, min_periods=period).mean()
-
-
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
 
 
 def trend_state(row):
@@ -857,9 +854,25 @@ def main():
         else []
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    dashboard_path = save_csv(dashboard_df, output_dir / "fund_forward_decision_dashboard.csv")
-    details_path = save_csv(detail_df, output_dir / "fund_forward_decision_details.csv")
-    analog_path = save_csv(analog_df, output_dir / "fund_forward_decision_analogs.csv") if not analog_df.empty else None
+    dashboard_path = save_csv(
+        dashboard_df,
+        output_dir / "fund_forward_decision_dashboard.csv",
+        allow_fallback=False,
+    )
+    details_path = save_csv(
+        detail_df,
+        output_dir / "fund_forward_decision_details.csv",
+        allow_fallback=False,
+    )
+    analog_path = (
+        save_csv(
+            analog_df,
+            output_dir / "fund_forward_decision_analogs.csv",
+            allow_fallback=False,
+        )
+        if not analog_df.empty
+        else None
+    )
     html_path = output_dir / "fund_forward_decision_dashboard.html"
     html_path.write_text(build_html_report(dashboard_df, detail_df, chart_paths, output_dir, args), encoding="utf-8")
 

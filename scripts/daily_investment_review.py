@@ -19,7 +19,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from common import CHARTS_DIR, DATA_DIR, REPORTS_DIR, resolve_repo_path
+from common import (
+    CHARTS_DIR,
+    DATA_DIR,
+    REPORTS_DIR,
+    infer_total_return_method,
+    resolve_repo_path,
+)
 from download_fund import TRACKED_FUNDS, download_fund
 
 
@@ -83,6 +89,10 @@ def download_or_find_files(fund_ids, years, skip_download):
             path = latest_local_fund_file(fund_id, years)
             if path is None:
                 raise FileNotFoundError(f"No local {years}Y CSV found for {fund_id}.")
+            total_return_method = infer_total_return_method(
+                pd.read_csv(path, nrows=1),
+                "TotalReturn",
+            )
             results.append(
                 {
                     "fund_id": fund_id,
@@ -92,6 +102,7 @@ def download_or_find_files(fund_ids, years, skip_download):
                     "current_date": "",
                     "change": "",
                     "change_pct": "",
+                    "total_return_method": total_return_method,
                     "records": "",
                     "output_path": str(path),
                     "mode": "local",
@@ -185,7 +196,7 @@ def read_technical_review(report_dir):
 def write_csv(rows, path, fieldnames):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -416,7 +427,7 @@ def copy_if_exists(source, destination):
     return None
 
 
-def write_daily_outputs(
+def write_daily_log(
     run_id,
     args,
     download_results,
@@ -428,7 +439,6 @@ def write_daily_outputs(
 ):
     daily_dir = resolve_repo_path(args.daily_dir)
     daily_dir.mkdir(parents=True, exist_ok=True)
-
     log_path = daily_dir / f"daily_investment_review_{run_id}.log"
     log_text = "\n".join(
         [
@@ -461,6 +471,19 @@ def write_daily_outputs(
         ]
     )
     log_path.write_text(log_text, encoding="utf-8")
+    return log_path
+
+
+def ensure_report_commands_succeeded(decision_result, technical_result, log_path):
+    if decision_result.returncode != 0:
+        raise RuntimeError(f"Forward decision report failed. See log: {log_path}")
+    if technical_result.returncode != 0:
+        raise RuntimeError(f"Technical signal review failed. See log: {log_path}")
+
+
+def write_daily_outputs(run_id, args, download_results, log_path):
+    daily_dir = resolve_repo_path(args.daily_dir)
+    daily_dir.mkdir(parents=True, exist_ok=True)
 
     downloads_path = daily_dir / f"daily_downloaded_files_{run_id}.csv"
     write_csv(
@@ -474,6 +497,7 @@ def write_daily_outputs(
             "current_date",
             "change",
             "change_pct",
+            "total_return_method",
             "records",
             "output_path",
             "mode",
@@ -555,7 +579,7 @@ def main():
     data_files = [Path(row["output_path"]) for row in download_results]
     decision_command, decision_result = run_forward_decision(data_files, args)
     technical_command, technical_result = run_technical_signal_review(data_files, args, run_id)
-    outputs = write_daily_outputs(
+    log_path = write_daily_log(
         run_id,
         args,
         download_results,
@@ -565,11 +589,13 @@ def main():
         technical_command,
         technical_result,
     )
-
-    if decision_result.returncode != 0:
-        raise RuntimeError(f"Forward decision report failed. See log: {outputs['log_path']}")
-    if technical_result.returncode != 0:
-        raise RuntimeError(f"Technical signal review failed. See log: {outputs['log_path']}")
+    ensure_report_commands_succeeded(decision_result, technical_result, log_path)
+    outputs = write_daily_outputs(
+        run_id,
+        args,
+        download_results,
+        log_path,
+    )
 
     print(f"Daily investment review complete: {run_id}")
     print(f"Analyzed funds: {outputs['dashboard_rows']}")

@@ -19,7 +19,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from common import CHARTS_DIR, DATA_DIR, REPORTS_DIR, TUNINGS_DIR, fund_label_from_data_file, resolve_repo_path, save_csv
+from common import (
+    CHARTS_DIR,
+    DATA_DIR,
+    LEGACY_TOTAL_RETURN_METHOD,
+    NOT_APPLICABLE_TOTAL_RETURN_METHOD,
+    REPORTS_DIR,
+    TUNINGS_DIR,
+    fund_label_from_data_file,
+    infer_total_return_method,
+    resolve_repo_path,
+    save_csv,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -139,6 +150,20 @@ def normalize_run_history(path):
     else:
         df = df.copy()
 
+    if "total_return_method" not in df.columns:
+        df["total_return_method"] = np.where(
+            df["price_column"].astype(str).eq("TotalReturn"),
+            LEGACY_TOTAL_RETURN_METHOD,
+            NOT_APPLICABLE_TOTAL_RETURN_METHOD,
+        )
+    else:
+        missing_method = df["total_return_method"].fillna("").astype(str).str.strip().eq("")
+        df.loc[missing_method, "total_return_method"] = np.where(
+            df.loc[missing_method, "price_column"].astype(str).eq("TotalReturn"),
+            LEGACY_TOTAL_RETURN_METHOD,
+            NOT_APPLICABLE_TOTAL_RETURN_METHOD,
+        )
+
     numeric_cols = [
         "adaptive_annualized_return_pct",
         "excess_annualized_return_pct",
@@ -198,7 +223,7 @@ def data_prefix_from_file(path):
     return fund_label_from_data_file(path)
 
 
-def select_params_for_fund(history, fund_label, price_column):
+def select_params_for_fund(history, fund_label, price_column, total_return_method):
     candidates = history[
         (history["fund_label"].astype(str).eq(fund_label))
         | history["data_file"].astype(str).map(lambda value: data_prefix_from_file(value)).eq(fund_label)
@@ -207,6 +232,10 @@ def select_params_for_fund(history, fund_label, price_column):
         same_price = candidates["price_column"].fillna("").astype(str).eq(price_column)
         if same_price.any():
             candidates = candidates[same_price].copy()
+    if "total_return_method" in candidates.columns:
+        candidates = candidates[
+            candidates["total_return_method"].astype(str).eq(total_return_method)
+        ].copy()
     if candidates.empty:
         return None
     if "run_started_at" in candidates.columns:
@@ -226,13 +255,14 @@ def load_price_data(path, price_column):
         raise ValueError(f"{path} does not contain a Date column")
     if price_column not in df.columns:
         raise ValueError(f"{path} does not contain price column {price_column}")
+    total_return_method = infer_total_return_method(df, price_column)
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df[price_column] = pd.to_numeric(df[price_column], errors="coerce")
     df = df.dropna(subset=["Date", price_column]).sort_values("Date").reset_index(drop=True)
     if df.empty:
         raise ValueError(f"{path} has no valid rows for {price_column}")
     df["NAV"] = df[price_column]
-    return df.set_index("Date")
+    return df.set_index("Date"), total_return_method
 
 
 def run_fixed_backtest(df, params, initial_capital):
@@ -582,13 +612,22 @@ def calculate_likelihoods(analysis_df, current_state, horizons, upside_target, d
     return rows
 
 
-def build_unavailable_rows(fund_label, data_file, status, message, horizons, primary_horizon):
+def build_unavailable_rows(
+    fund_label,
+    data_file,
+    status,
+    message,
+    horizons,
+    primary_horizon,
+    total_return_method="",
+):
     detail_rows = []
     for label, days in horizons.items():
         detail_rows.append(
             {
                 "Fund Label": fund_label,
                 "Data File": str(data_file),
+                "Total Return Method": total_return_method,
                 "Status": status,
                 "Status Message": message,
                 "Horizon": label,
@@ -603,6 +642,7 @@ def build_unavailable_rows(fund_label, data_file, status, message, horizons, pri
     summary = {
         "Fund Label": fund_label,
         "Data File": str(data_file),
+        "Total Return Method": total_return_method,
         "Status": status,
         "Status Message": message,
         "Horizon": primary_horizon,
@@ -617,19 +657,36 @@ def build_unavailable_rows(fund_label, data_file, status, message, horizons, pri
 
 def analyze_file(path, args, history, horizons):
     fund_label = fund_label_from_data_file(path)
-    params = select_params_for_fund(history, fund_label, args.price_column)
+    try:
+        price_df, total_return_method = load_price_data(path, args.price_column)
+    except Exception as exc:
+        return build_unavailable_rows(
+            fund_label,
+            path,
+            "DATA_FAILED",
+            str(exc),
+            horizons,
+            args.primary_horizon,
+        )
+
+    params = select_params_for_fund(
+        history,
+        fund_label,
+        args.price_column,
+        total_return_method,
+    )
     if params is None:
         return build_unavailable_rows(
             fund_label,
             path,
             "NO_PARAMETERS",
-            "No completed historical tuning/run row matched this fund.",
+            f"No completed historical tuning/run row matched this fund and TotalReturn method ({total_return_method}).",
             horizons,
             args.primary_horizon,
+            total_return_method,
         )
 
     try:
-        price_df = load_price_data(path, args.price_column)
         result = run_fixed_backtest(price_df, params, args.initial_capital)
     except Exception as exc:
         return build_unavailable_rows(
@@ -639,6 +696,7 @@ def analyze_file(path, args, history, horizons):
             str(exc),
             horizons,
             args.primary_horizon,
+            total_return_method,
         )
 
     analysis_df, total_return, num_trades, trades, win_rate, avg_return, decisions_df, sharpe, max_dd = result
@@ -694,6 +752,7 @@ def analyze_file(path, args, history, horizons):
     base = {
         "Fund Label": fund_label,
         "Data File": str(path),
+        "Total Return Method": total_return_method,
         "Status": "OK",
         "Status Message": "",
         "Latest Date": latest_date,
@@ -811,8 +870,16 @@ def main():
     summary_df = pd.DataFrame(summaries)
     detail_df = pd.DataFrame(details)
     output_dir = resolve_repo_path(args.output_dir)
-    summary_path = save_csv(summary_df, output_dir / "technical_signal_review.csv")
-    details_path = save_csv(detail_df, output_dir / "technical_signal_details.csv")
+    summary_path = save_csv(
+        summary_df,
+        output_dir / "technical_signal_review.csv",
+        allow_fallback=False,
+    )
+    details_path = save_csv(
+        detail_df,
+        output_dir / "technical_signal_details.csv",
+        allow_fallback=False,
+    )
 
     if args.validate:
         expected = [fund_label_from_data_file(path) for path in data_paths]

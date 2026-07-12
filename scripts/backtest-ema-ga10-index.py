@@ -20,6 +20,13 @@ import platform
 import socket
 import time
 
+from common import (
+    LEGACY_TOTAL_RETURN_METHOD,
+    NOT_APPLICABLE_TOTAL_RETURN_METHOD,
+    calculate_rsi,
+    infer_total_return_method,
+)
+
 try:
     import yfinance as yf
 except ImportError:
@@ -432,6 +439,7 @@ def build_param_set_id(row):
     keys = [
         "fund_label",
         "price_column",
+        "total_return_method",
         "lookback_years",
         "offset_months",
         "strategy_profile",
@@ -672,7 +680,8 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
                        long_ema_bounds_value,
                        rsi_oversold_bounds_value=DEFAULT_RSI_OVERSOLD_BOUNDS,
                        rsi_overbought_bounds_value=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
-                       machine_metadata=None):
+                       machine_metadata=None,
+                       total_return_method=NOT_APPLICABLE_TOTAL_RETURN_METHOD):
     machine_metadata = machine_metadata or get_machine_metadata()
     return {
         "run_id": run_id,
@@ -680,6 +689,7 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
         "fund_label": fund_label,
         "data_file": str(csv_path),
         "price_column": price_column,
+        "total_return_method": total_return_method,
         "data_start": format_date(data_start),
         "data_end": format_date(data_end),
         "row_count": row_count,
@@ -731,6 +741,21 @@ def normalize_tuning_history_columns(df):
         df["rsi_overbought"] = DEFAULT_STRATEGY_PARAMETERS["rsi_overbought"]
     if "rsi_period" not in df.columns:
         df["rsi_period"] = DEFAULT_RSI_PERIOD
+    if "total_return_method" not in df.columns:
+        price_columns = df.get("price_column", pd.Series("TotalReturn", index=df.index))
+        df["total_return_method"] = np.where(
+            price_columns.astype(str).eq("TotalReturn"),
+            LEGACY_TOTAL_RETURN_METHOD,
+            NOT_APPLICABLE_TOTAL_RETURN_METHOD,
+        )
+    else:
+        missing_method = df["total_return_method"].fillna("").astype(str).str.strip().eq("")
+        price_columns = df.get("price_column", pd.Series("TotalReturn", index=df.index))
+        df.loc[missing_method, "total_return_method"] = np.where(
+            price_columns.loc[missing_method].astype(str).eq("TotalReturn"),
+            LEGACY_TOTAL_RETURN_METHOD,
+            NOT_APPLICABLE_TOTAL_RETURN_METHOD,
+        )
     return df
 
 
@@ -758,6 +783,7 @@ def refresh_top5_parameter_sets():
     group_cols = [
         "fund_label",
         "price_column",
+        "total_return_method",
         "lookback_years",
         "offset_months",
         "strategy_profile",
@@ -1021,24 +1047,6 @@ def download_market_data(symbol, years=2, interval="1d"):
 def calculate_ema(prices, period):
     """Calculate Exponential Moving Average"""
     return prices.ewm(span=period, adjust=False).mean()
-
-def calculate_rsi(prices, period=14):
-    """Calculate Relative Strength Index with proper handling of division by zero"""
-    delta = prices.diff(1)
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=period, min_periods=1).mean()
-    avg_loss = loss.rolling(window=period, min_periods=1).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs.replace([np.inf, -np.inf], np.nan).fillna(0)))
-    # Handle cases where avg_loss == 0
-    rsi[avg_loss == 0] = 100.0
-    # Handle cases where avg_gain == 0 and avg_loss == 0
-    rsi[(avg_gain == 0) & (avg_loss == 0)] = 50.0
-    # Handle NaN (early periods or no movement)
-    rsi = rsi.fillna(50.0)  # Neutral value for no movement
-    return rsi
-
 
 def portfolio_value_from_state(shares, cash, price):
     return (shares * price) + cash
@@ -2145,6 +2153,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 f"Available columns: {list(df_clean.columns)}"
             )
 
+        total_return_method = infer_total_return_method(df_clean, price_col)
+
         if price_col == 'Close':
             df_clean['NAV'] = df_clean['Close']
             cols_to_drop = [col for col in ['High', 'Low', 'Open', 'Volume'] if col in df_clean.columns]
@@ -2166,6 +2176,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
 
         log_print(f"Loading data from {csv_path}...")
         log_print(f"Price data loaded from {price_col}: {len(df_clean)} valid data points")
+        log_print(f"TotalReturn method: {total_return_method}")
         log_print(
             f"Date range: {df_clean.index.min().strftime('%Y-%m-%d')} "
             f"to {df_clean.index.max().strftime('%Y-%m-%d')}"
@@ -2178,6 +2189,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "fund_label": csv_name,
             "data_file": str(csv_path),
             "price_column": price_col,
+            "total_return_method": total_return_method,
             "lookback_years": lookback_years,
             "offset_months": offset_months,
             "strategy_profile": strategy_profile,
@@ -2220,7 +2232,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             long_ema_bounds_value,
             rsi_oversold_bounds_value,
             rsi_overbought_bounds_value,
-            machine_metadata,
+            machine_metadata=machine_metadata,
+            total_return_method=total_return_method,
         )
         strategy_parameter_metadata = build_strategy_parameter_metadata(
             {},
