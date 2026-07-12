@@ -1,5 +1,7 @@
 import argparse
+import html
 import importlib.util
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.backends.backend_pdf import PdfPages
 
 from common import fund_label_from_data_file
 
@@ -24,6 +27,7 @@ OUTPUTS_DIR = REPO_ROOT / "outputs"
 LOGS_DIR = OUTPUTS_DIR / "logs"
 CHARTS_DIR = OUTPUTS_DIR / "charts"
 TUNINGS_DIR = OUTPUTS_DIR / "tunings"
+REPORTS_DIR = OUTPUTS_DIR / "reports"
 DEFAULT_RUN_HISTORY_FILE = TUNINGS_DIR / "backtest_run_history.csv"
 
 
@@ -81,6 +85,7 @@ def ensure_output_dirs():
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     CHARTS_DIR.mkdir(parents=True, exist_ok=True)
     TUNINGS_DIR.mkdir(parents=True, exist_ok=True)
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def safe_float(row, key, default=0.0):
@@ -862,10 +867,192 @@ def run_one_fund(row, args, run_timestamp):
         "log_file": str(log_path),
         "technical_chart_file": str(technical_chart),
         "simple_chart_file": str(simple_chart),
+        "latest_chart_file": str(latest_chart),
+        "latest_data_start": df_full.index.min().strftime("%Y-%m-%d"),
+        "latest_data_end": df_full.index.max().strftime("%Y-%m-%d"),
+        "latest_adaptive_return_pct": metrics_latest["adaptive_return"],
+        "latest_buy_hold_return_pct": buy_hold_return_latest,
+        "latest_excess_return_pct": metrics_latest["excess_return"],
+        "latest_adaptive_annualized_return_pct": metrics_latest["adaptive_annualized_return"],
+        "latest_buy_hold_annualized_return_pct": metrics_latest["buy_hold_annualized_return"],
+        "latest_excess_annualized_return_pct": metrics_latest["excess_annualized_return"],
+        "latest_sharpe": metrics_latest["sharpe"],
+        "latest_max_dd_pct": metrics_latest["max_dd"],
         "run_started_at": started_at.strftime("%Y-%m-%d %H:%M:%S"),
         "run_completed_at": completed_at.strftime("%Y-%m-%d %H:%M:%S"),
         "duration_seconds": duration_seconds,
     }
+
+
+def sorted_latest_results(results):
+    completed = [row for row in results if row.get("status") == "completed" and row.get("latest_chart_file")]
+    completed.sort(
+        key=lambda row: safe_float(row, "latest_adaptive_annualized_return_pct", float("-inf")),
+        reverse=True,
+    )
+    return completed
+
+
+def write_latest_dashboard(results, run_timestamp):
+    completed = sorted_latest_results(results)
+
+    def pct(row, key):
+        value = row.get(key)
+        return "n/a" if value is None or pd.isna(value) else f"{float(value):+.2f}%"
+
+    cards = []
+    for rank, row in enumerate(completed, start=1):
+        chart_path = Path(row["latest_chart_file"])
+        chart_src = os.path.relpath(chart_path, REPORTS_DIR).replace(os.sep, "/")
+        fund_label = html.escape(str(row.get("fund_label", "Unknown fund")))
+        chart_alt = html.escape(f"Latest strategy chart for {row.get('fund_label', 'fund')}")
+        cards.append(
+            f"""
+            <article class="fund-card">
+              <div class="card-heading">
+                <div><span class="rank">#{rank}</span><h2>{fund_label}</h2></div>
+                <div class="annual-return"><span>Annual return</span><strong>{pct(row, 'latest_adaptive_annualized_return_pct')}</strong></div>
+              </div>
+              <div class="metrics">
+                <span>Fund return <b>{pct(row, 'latest_adaptive_return_pct')}</b></span>
+                <span>Buy &amp; hold ann. <b>{pct(row, 'latest_buy_hold_annualized_return_pct')}</b></span>
+                <span>Excess ann. <b>{pct(row, 'latest_excess_annualized_return_pct')}</b></span>
+                <span>Max drawdown <b>{pct(row, 'latest_max_dd_pct')}</b></span>
+                <span>Through <b>{html.escape(str(row.get('latest_data_end', 'n/a')))}</b></span>
+              </div>
+              <button class="chart-button" type="button" data-src="{html.escape(chart_src, quote=True)}" data-title="{fund_label}" aria-label="Open zoomable chart for {fund_label}">
+                <img src="{html.escape(chart_src, quote=True)}" alt="{chart_alt}" loading="lazy">
+                <span class="zoom-hint">Click to zoom</span>
+              </button>
+            </article>
+            """
+        )
+
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    dashboard = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Latest Fund Backtest Dashboard</title>
+  <style>
+    :root{{--ink:#172033;--muted:#667085;--line:#dce2ea;--surface:#fff;--accent:#176b5b;--accent-soft:#e8f4f1;--bg:#f3f5f7}}
+    *{{box-sizing:border-box}}
+    body{{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,Segoe UI,Arial,sans-serif}}
+    header{{position:sticky;top:0;z-index:10;padding:20px clamp(18px,4vw,52px);background:rgba(243,245,247,.94);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}}
+    header h1{{margin:0 0 5px;font-size:clamp(1.45rem,3vw,2.2rem)}}
+    header p{{margin:0;color:var(--muted)}}
+    main{{display:grid;gap:22px;padding:28px clamp(16px,3vw,42px) 56px;max-width:1900px;margin:auto}}
+    .fund-card{{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 8px 26px rgba(19,33,55,.06)}}
+    .card-heading,.card-heading>div,.metrics{{display:flex;align-items:center}}
+    .card-heading{{justify-content:space-between;gap:18px;margin-bottom:13px}}
+    .card-heading>div:first-child{{gap:10px;min-width:0}}
+    .rank{{display:grid;place-items:center;min-width:38px;height:30px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-weight:800}}
+    h2{{font-size:clamp(1rem,2vw,1.35rem);margin:0;overflow-wrap:anywhere}}
+    .annual-return{{display:flex;flex-direction:column!important;align-items:flex-end!important;white-space:nowrap}}
+    .annual-return span{{font-size:.76rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}}
+    .annual-return strong{{font-size:1.35rem;color:var(--accent)}}
+    .metrics{{flex-wrap:wrap;gap:8px;margin-bottom:14px}}
+    .metrics span{{padding:7px 10px;border-radius:9px;background:#f7f8fa;color:var(--muted);font-size:.84rem}}
+    .metrics b{{color:var(--ink)}}
+    .chart-button{{display:block;position:relative;width:100%;padding:0;border:0;border-radius:12px;overflow:hidden;background:#e8ebef;cursor:zoom-in}}
+    .chart-button img{{display:block;width:100%;height:auto}}
+    .zoom-hint{{position:absolute;right:12px;bottom:12px;padding:7px 10px;border-radius:8px;background:rgba(16,24,40,.78);color:#fff;font-size:.78rem;opacity:0;transition:opacity .18s}}
+    .chart-button:hover .zoom-hint,.chart-button:focus-visible .zoom-hint{{opacity:1}}
+    dialog{{width:calc(100vw - 24px);height:calc(100vh - 24px);max-width:none;max-height:none;padding:0;border:0;border-radius:16px;background:#111827;overflow:hidden}}
+    dialog::backdrop{{background:rgba(3,8,18,.82)}}
+    .viewer-bar{{position:absolute;inset:0 0 auto 0;z-index:3;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:rgba(17,24,39,.9);color:white}}
+    .viewer-bar strong{{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+    .controls{{display:flex;gap:7px}}
+    .controls button{{border:1px solid #667085;background:#263246;color:white;border-radius:8px;padding:7px 11px;cursor:pointer}}
+    .viewport{{width:100%;height:100%;overflow:hidden;cursor:grab;touch-action:none}}
+    .viewport.dragging{{cursor:grabbing}}
+    #viewerImage{{position:absolute;left:50%;top:50%;max-width:none;transform-origin:center;user-select:none;pointer-events:none}}
+    @media (min-width:1200px){{main{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+    @page{{size:A4 landscape;margin:8mm}}
+    @media print{{
+      body{{background:#fff}}
+      header,dialog,.zoom-hint{{display:none!important}}
+      main{{display:block;max-width:none;padding:0;margin:0}}
+      .fund-card{{height:194mm;margin:0;padding:4mm;border:0;border-radius:0;box-shadow:none;overflow:hidden;break-inside:avoid;page-break-inside:avoid;break-after:page;page-break-after:always}}
+      .fund-card:last-child{{break-after:auto;page-break-after:auto}}
+      .card-heading{{margin-bottom:2mm}}
+      .metrics{{margin-bottom:2mm;gap:1.5mm}}
+      .metrics span{{padding:1.5mm 2mm}}
+      .chart-button{{height:158mm;border-radius:0;cursor:default;overflow:hidden}}
+      .chart-button img{{width:100%;height:100%;object-fit:contain}}
+    }}
+  </style>
+</head>
+<body>
+  <header><h1>Latest Fund Backtest Dashboard</h1><p>{len(completed)} funds · sorted by latest strategy annualized return · generated {generated_at}</p></header>
+  <main>{''.join(cards) if cards else '<p>No completed latest charts were available.</p>'}</main>
+  <dialog id="viewer">
+    <div class="viewer-bar"><strong id="viewerTitle">Chart</strong><div class="controls"><button id="zoomOut" type="button">−</button><button id="resetZoom" type="button">Reset</button><button id="zoomIn" type="button">+</button><button id="closeViewer" type="button">Close</button></div></div>
+    <div class="viewport" id="viewport"><img id="viewerImage" alt=""></div>
+  </dialog>
+  <script>
+    const viewer=document.getElementById('viewer'), viewport=document.getElementById('viewport'), image=document.getElementById('viewerImage');
+    let scale=1,x=0,y=0,drag=false,startX=0,startY=0;
+    function render(){{image.style.transform=`translate(calc(-50% + ${{x}}px),calc(-50% + ${{y}}px)) scale(${{scale}})`}}
+    function fit(){{if(!image.naturalWidth)return;scale=Math.min(1,(viewport.clientWidth-36)/image.naturalWidth,(viewport.clientHeight-86)/image.naturalHeight);x=0;y=0;render()}}
+    function reset(){{fit()}}
+    function zoom(factor){{scale=Math.min(8,Math.max(.5,scale*factor));render()}}
+    image.addEventListener('load',fit);
+    document.querySelectorAll('.chart-button').forEach(button=>button.addEventListener('click',()=>{{image.src=button.dataset.src;image.alt=button.dataset.title;document.getElementById('viewerTitle').textContent=button.dataset.title;viewer.showModal();if(image.complete)fit()}}));
+    document.getElementById('closeViewer').onclick=()=>viewer.close();
+    document.getElementById('zoomIn').onclick=()=>zoom(1.25);document.getElementById('zoomOut').onclick=()=>zoom(.8);document.getElementById('resetZoom').onclick=reset;
+    viewport.addEventListener('wheel',event=>{{event.preventDefault();zoom(event.deltaY<0?1.15:.87)}},{{passive:false}});
+    viewport.addEventListener('pointerdown',event=>{{drag=true;startX=event.clientX-x;startY=event.clientY-y;viewport.setPointerCapture(event.pointerId);viewport.classList.add('dragging')}});
+    viewport.addEventListener('pointermove',event=>{{if(!drag)return;x=event.clientX-startX;y=event.clientY-startY;render()}});
+    viewport.addEventListener('pointerup',()=>{{drag=false;viewport.classList.remove('dragging')}});
+    viewer.addEventListener('click',event=>{{if(event.target===viewer)viewer.close()}});
+  </script>
+</body>
+</html>"""
+    dashboard_path = REPORTS_DIR / "dashboard.html"
+    dashboard_path.write_text(dashboard, encoding="utf-8")
+    return dashboard_path
+
+
+def write_latest_pdf(results):
+    completed = sorted_latest_results(results)
+    pdf_path = REPORTS_DIR / "dashboard.pdf"
+    with PdfPages(pdf_path) as pdf:
+        for rank, row in enumerate(completed, start=1):
+            chart_path = Path(row["latest_chart_file"])
+            if not chart_path.exists():
+                continue
+
+            figure = plt.figure(figsize=(11.69, 8.27), facecolor="white")
+            fund_label = str(row.get("fund_label", "Unknown fund"))
+            annualized = safe_float(row, "latest_adaptive_annualized_return_pct", np.nan)
+            figure.text(0.045, 0.948, f"#{rank}  {fund_label}", fontsize=17, fontweight="bold", color="#172033", va="top")
+            figure.text(
+                0.955,
+                0.948,
+                f"Annual return {annualized:+.2f}%" if np.isfinite(annualized) else "Annual return n/a",
+                fontsize=15,
+                fontweight="bold",
+                color="#176b5b",
+                ha="right",
+                va="top",
+            )
+            metrics_line = (
+                f"Fund return {safe_float(row, 'latest_adaptive_return_pct', np.nan):+.2f}%    |    "
+                f"Buy & hold annualized {safe_float(row, 'latest_buy_hold_annualized_return_pct', np.nan):+.2f}%    |    "
+                f"Excess annualized {safe_float(row, 'latest_excess_annualized_return_pct', np.nan):+.2f}%    |    "
+                f"Max drawdown {safe_float(row, 'latest_max_dd_pct', np.nan):.2f}%    |    "
+                f"Through {row.get('latest_data_end', 'n/a')}"
+            )
+            figure.text(0.045, 0.895, metrics_line, fontsize=9.5, color="#596579", va="top")
+
+            chart_axis = figure.add_axes([0.035, 0.035, 0.93, 0.82])
+            chart_axis.imshow(plt.imread(chart_path))
+            chart_axis.set_axis_off()
+            pdf.savefig(figure)
+            plt.close(figure)
+    return pdf_path
 
 
 def main():
@@ -907,7 +1094,11 @@ def main():
 
     summary_output = TUNINGS_DIR / f"final_backtest_summary_{run_timestamp}.csv"
     pd.DataFrame(results).to_csv(summary_output, index=False)
+    dashboard_path = write_latest_dashboard(results, run_timestamp)
+    pdf_path = write_latest_pdf(results)
     print(f"\nFinal backtest summary saved to: {summary_output}")
+    print(f"Latest chart dashboard saved to: {dashboard_path}")
+    print(f"One-fund-per-page PDF saved to: {pdf_path}")
     return 0
 
 

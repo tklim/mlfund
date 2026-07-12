@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import re
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,8 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import common
 import download_fund
+import final_backtest_from_summary
+import fund_forward_decision
 import fund_strategy_review
 import operate
 
@@ -159,12 +162,126 @@ class OperationalPipelineTests(unittest.TestCase):
         idx = command.index("--upside-target")
         self.assertEqual(command[idx + 1], "0.15")
         self.assertNotIn("--upside-target 15", operate.command_text(command))
+        self.assertEqual(command[command.index("--min-analogs") + 1], "6")
+        self.assertEqual(command[command.index("--max-analogs") + 1], "20")
+        self.assertEqual(command[command.index("--prior-strength") + 1], "8")
+
+    def test_forward_confidence_is_low_with_too_few_independent_observations(self):
+        self.assertEqual(fund_forward_decision.confidence_level(150, 4, 40), "LOW")
+        self.assertEqual(fund_forward_decision.confidence_level(150, 5, 40), "MEDIUM")
+
+    def test_forward_analogs_are_non_overlapping(self):
+        frame = pd.DataFrame(
+            {
+                "Start Date": pd.date_range("2020-01-01", periods=18, freq="MS"),
+                "Forward Return": range(18),
+            }
+        )
+        selected = fund_forward_decision.select_non_overlapping_rows(frame, horizon_days=63)
+        gaps = selected["Start Date"].sort_values().diff().dropna().dt.days
+        self.assertTrue((gaps >= 91).all())
+        self.assertLess(len(selected), len(frame))
+
+    def test_forward_probability_shrinks_toward_fund_base_rate(self):
+        probability, low, high = fund_forward_decision.shrunk_binomial_estimate(
+            successes=4,
+            observations=4,
+            base_probability=0.20,
+            prior_strength=8,
+        )
+        self.assertGreater(probability, 0.20)
+        self.assertLess(probability, 1.0)
+        self.assertLess(low, probability)
+        self.assertGreater(high, probability)
+
+    def test_practical_buy_requires_trend_and_relative_strength_confirmation(self):
+        bullish = pd.Series(
+            {
+                "Probability >= Upside Target": 0.50,
+                "Base Probability >= Upside Target": 0.20,
+                "Upside Probability CI Low": 0.20,
+                "Probability <= Downside Risk": 0.08,
+                "Base Probability <= Downside Risk": 0.10,
+                "Probability > 0": 0.70,
+                "Expected Forward Return": 0.12,
+                "Conditional Expected Edge": 0.05,
+                "Confidence Level": "MEDIUM",
+                "Horizon": "6M",
+                "Analog Count": 8,
+                "Candidate Analog Count": 500,
+                "Upside Target": 0.15,
+                "Downside Risk": -0.08,
+                "Current Trailing Return 6M": 0.18,
+                "Current EMA 50/200 Gap": 0.06,
+                "Current EMA 200 Slope 1M": 0.02,
+                "Cross-Fund Momentum Percentile": 0.90,
+            }
+        )
+        weak_rebound = bullish.copy()
+        weak_rebound["Current Trailing Return 6M"] = -0.18
+        weak_rebound["Current EMA 50/200 Gap"] = -0.06
+        weak_rebound["Current EMA 200 Slope 1M"] = -0.02
+        weak_rebound["Cross-Fund Momentum Percentile"] = 0.10
+
+        self.assertEqual(fund_forward_decision.decide(bullish)[0], "BUY")
+        self.assertNotEqual(fund_forward_decision.decide(weak_rebound)[0], "BUY")
 
     def test_final_backtest_command_uses_all_funds(self):
         command = operate.build_final_backtest_command(self.config)
         self.assertIn("final_backtest_from_summary.py", command[1])
         self.assertEqual(command[command.index("--top-funds") + 1], "0")
         self.assertEqual(command[command.index("--price-column") + 1], "TotalReturn")
+
+    def test_latest_dashboard_sorts_funds_and_includes_zoom_controls(self):
+        rows = [
+            {
+                "status": "completed",
+                "fund_label": "LOW_RETURN",
+                "latest_chart_file": "charts/low.png",
+                "latest_adaptive_annualized_return_pct": 3.0,
+                "latest_adaptive_return_pct": 4.0,
+                "latest_buy_hold_annualized_return_pct": 2.0,
+                "latest_excess_annualized_return_pct": 1.0,
+                "latest_max_dd_pct": 5.0,
+                "latest_data_end": "2026-07-10",
+            },
+            {
+                "status": "completed",
+                "fund_label": "HIGH_RETURN",
+                "latest_chart_file": "charts/high.png",
+                "latest_adaptive_annualized_return_pct": 12.0,
+                "latest_adaptive_return_pct": 18.0,
+                "latest_buy_hold_annualized_return_pct": 8.0,
+                "latest_excess_annualized_return_pct": 4.0,
+                "latest_max_dd_pct": 6.0,
+                "latest_data_end": "2026-07-10",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            chart_dir = Path(tmpdir) / "charts"
+            chart_dir.mkdir()
+            for row in rows:
+                chart_path = chart_dir / f"{row['fund_label']}.png"
+                final_backtest_from_summary.plt.imsave(
+                    chart_path,
+                    final_backtest_from_summary.np.ones((20, 40, 3)),
+                )
+                row["latest_chart_file"] = str(chart_path)
+            with mock.patch.object(final_backtest_from_summary, "REPORTS_DIR", Path(tmpdir)):
+                dashboard_path = final_backtest_from_summary.write_latest_dashboard(rows, "test-run")
+                pdf_path = final_backtest_from_summary.write_latest_pdf(rows)
+            dashboard = dashboard_path.read_text(encoding="utf-8")
+            pdf_bytes = pdf_path.read_bytes()
+
+        self.assertLess(dashboard.index("HIGH_RETURN"), dashboard.index("LOW_RETURN"))
+        self.assertEqual(dashboard.count('class="fund-card"'), 2)
+        self.assertIn("Click to zoom", dashboard)
+        self.assertIn("@page{size:A4 landscape", dashboard)
+        self.assertIn("break-after:page", dashboard)
+        self.assertIn("image.addEventListener('load',fit)", dashboard)
+        self.assertIn("viewport.addEventListener('wheel'", dashboard)
+        self.assertTrue(pdf_bytes.startswith(b"%PDF"))
+        self.assertEqual(len(re.findall(rb"/Type\s*/Page\b", pdf_bytes)), 2)
 
     def test_report_commands_include_final_backtest(self):
         commands = operate.build_report_commands(self.config)
@@ -205,6 +322,70 @@ class OperationalPipelineTests(unittest.TestCase):
         self.assertEqual(rows[0]["fund_label"], "MAUS_RMH_USEquityRMH")
         self.assertEqual(rows[0]["freshness_status"], "fresh")
         self.assertEqual(rows[0]["missing_columns"], "")
+
+    def test_decision_scores_identify_bullish_bearish_and_low_reliability_cases(self):
+        dashboard = pd.DataFrame(
+            [
+                {
+                    "Fund Label": "BULL",
+                    "Probability >= Upside Target": 0.80,
+                    "Probability <= Downside Risk": 0.05,
+                    "Probability > 0": 0.90,
+                    "Expected Forward Return": 0.20,
+                    "Upside Target": 0.15,
+                    "Downside Risk": -0.08,
+                    "Current Trend State": "uptrend",
+                    "Effective Observations": 20,
+                    "Confidence Level": "NORMAL",
+                },
+                {
+                    "Fund Label": "BEAR",
+                    "Probability >= Upside Target": 0.05,
+                    "Probability <= Downside Risk": 0.80,
+                    "Probability > 0": 0.10,
+                    "Expected Forward Return": -0.12,
+                    "Upside Target": 0.15,
+                    "Downside Risk": -0.08,
+                    "Current Trend State": "downtrend",
+                    "Effective Observations": 20,
+                    "Confidence Level": "NORMAL",
+                },
+                {
+                    "Fund Label": "THIN_SAMPLE",
+                    "Probability >= Upside Target": 0.80,
+                    "Probability <= Downside Risk": 0.05,
+                    "Probability > 0": 0.90,
+                    "Expected Forward Return": 0.20,
+                    "Upside Target": 0.15,
+                    "Downside Risk": -0.08,
+                    "Current Trend State": "uptrend",
+                    "Effective Observations": 2,
+                    "Confidence Level": "MEDIUM",
+                },
+            ]
+        )
+        strategies = pd.DataFrame(
+            [
+                {"fund_label": "BULL", "ga_signal": "BUY/HOLD invested", "excess_annualized_return_pct": 20},
+                {"fund_label": "BEAR", "ga_signal": "SELL / CASH", "excess_annualized_return_pct": -20},
+                {"fund_label": "THIN_SAMPLE", "ga_signal": "BUY/HOLD invested", "excess_annualized_return_pct": 20},
+            ]
+        )
+        health = pd.DataFrame(
+            [
+                {"fund_label": fund, "freshness_status": "fresh"}
+                for fund in ["BULL", "BEAR", "THIN_SAMPLE"]
+            ]
+        )
+
+        scores = operate.build_decision_scores(dashboard, strategies, health).set_index("Fund Label")
+
+        self.assertEqual(scores.loc["BULL", "Conclusion"], "STRONG BUY EVIDENCE")
+        self.assertGreater(scores.loc["BULL", "Buy Score"], scores.loc["BULL", "Sell Score"])
+        self.assertEqual(scores.loc["BEAR", "Conclusion"], "STRONG SELL EVIDENCE")
+        self.assertGreater(scores.loc["BEAR", "Sell Score"], scores.loc["BEAR", "Buy Score"])
+        self.assertEqual(scores.loc["THIN_SAMPLE", "Conclusion"], "HOLD / WATCH")
+        self.assertLess(abs(scores.loc["THIN_SAMPLE", "Buy Score"] - 50), abs(scores.loc["BULL", "Buy Score"] - 50))
 
     def test_download_many_continues_after_one_failed_fund(self):
         def fake_download(fund_id, years):

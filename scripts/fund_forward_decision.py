@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 import numpy as np
 import pandas as pd
+from scipy.stats import beta as beta_distribution
 
 from common import CHARTS_DIR, DATA_DIR, REPORTS_DIR, fund_label_from_data_file, resolve_repo_path, save_csv
 from fund_probability_analysis import (
@@ -46,6 +47,8 @@ FEATURE_WEIGHTS = {
 }
 ACTION_ORDER = {"BUY": 0, "HOLD / WATCH": 1, "SELL / AVOID": 2}
 TRADING_DAYS = 252
+DEFAULT_PRIOR_STRENGTH = 8.0
+MIN_CROSS_FUND_MOMENTUM_PERCENTILE = 0.55
 
 
 def parse_args():
@@ -78,8 +81,24 @@ def parse_args():
     parser.add_argument("--primary-horizon", default="6M", help="Horizon used for headline decision label.")
     parser.add_argument("--upside-target", type=float, default=0.15, help="Upside target return as decimal.")
     parser.add_argument("--downside-risk", type=float, default=-0.08, help="Downside risk threshold as decimal.")
-    parser.add_argument("--min-analogs", type=int, default=40, help="Minimum analog rows for normal confidence.")
-    parser.add_argument("--max-analogs", type=int, default=150, help="Maximum nearest analog rows to use.")
+    parser.add_argument(
+        "--min-analogs",
+        type=int,
+        default=6,
+        help="Minimum independent analog periods required above low confidence (default: 6).",
+    )
+    parser.add_argument(
+        "--max-analogs",
+        type=int,
+        default=20,
+        help="Maximum non-overlapping nearest analog periods to use (default: 20).",
+    )
+    parser.add_argument(
+        "--prior-strength",
+        type=float,
+        default=DEFAULT_PRIOR_STRENGTH,
+        help="Unconditional base-rate pseudo-observations used to shrink analog estimates (default: 8).",
+    )
     parser.add_argument(
         "--output-dir",
         default=str(REPORTS_DIR),
@@ -164,12 +183,41 @@ def count_non_overlapping_dates(dates, horizon_days):
     return max(1, count)
 
 
+def select_non_overlapping_rows(frame, horizon_days, max_rows=None, sort_columns=None):
+    """Greedily select periods whose start dates do not overlap the horizon."""
+    if frame.empty or "Start Date" not in frame.columns:
+        return frame.head(0).copy()
+    sort_columns = sort_columns or ["Start Date"]
+    ranked = frame.sort_values(sort_columns).copy()
+    min_gap = pd.Timedelta(days=max(1, int(round(horizon_days * 365.25 / TRADING_DAYS))))
+    selected_indices = []
+    selected_dates = []
+    for index, row in ranked.iterrows():
+        start_date = pd.Timestamp(row["Start Date"])
+        if all(abs(start_date - existing) >= min_gap for existing in selected_dates):
+            selected_indices.append(index)
+            selected_dates.append(start_date)
+            if max_rows and len(selected_indices) >= max_rows:
+                break
+    return ranked.loc[selected_indices].reset_index(drop=True)
+
+
 def confidence_level(analog_count, effective_observations, min_analogs):
-    if analog_count < min_analogs:
+    if analog_count < min_analogs or effective_observations < 5:
         return "LOW"
     if effective_observations < max(10, min_analogs // 3):
         return "MEDIUM"
     return "NORMAL"
+
+
+def shrunk_binomial_estimate(successes, observations, base_probability, prior_strength):
+    """Return a base-rate-shrunk probability and a 95% beta interval."""
+    base_probability = float(np.clip(base_probability, 0.0, 1.0))
+    prior_strength = max(0.0, float(prior_strength))
+    alpha = 0.5 + successes + prior_strength * base_probability
+    beta = 0.5 + (observations - successes) + prior_strength * (1.0 - base_probability)
+    probability = alpha / (alpha + beta)
+    return probability, beta_distribution.ppf(0.025, alpha, beta), beta_distribution.ppf(0.975, alpha, beta)
 
 
 def nearest_analogs(feature_frame, forward_frame, latest_row, horizon_label, horizon_days, args):
@@ -199,7 +247,15 @@ def nearest_analogs(feature_frame, forward_frame, latest_row, horizon_label, hor
     candidates["Analog Distance"] = np.sqrt(distances) + trend_penalty
     candidates["Horizon"] = horizon_label
     candidates["Horizon Days"] = horizon_days
-    return candidates.sort_values(["Analog Distance", "Start Date"]).head(args.max_analogs).reset_index(drop=True)
+    candidate_count = len(candidates)
+    selected = select_non_overlapping_rows(
+        candidates,
+        horizon_days,
+        max_rows=args.max_analogs,
+        sort_columns=["Analog Distance", "Start Date"],
+    )
+    selected.attrs["candidate_count"] = candidate_count
+    return selected
 
 
 def metric_or_nan(series, fn):
@@ -208,17 +264,40 @@ def metric_or_nan(series, fn):
     return fn(series)
 
 
-def summarize_analogs(fund_label, latest_row, horizon_label, horizon_days, analogs, args):
+def summarize_analogs(fund_label, latest_row, horizon_label, horizon_days, analogs, forward_frame, args):
     returns = analogs["Forward Return"].dropna()
     analog_count = len(returns)
-    effective_n = count_non_overlapping_dates(analogs["Start Date"], horizon_days) if analog_count else 0
-    upside_probability = (returns >= args.upside_target).mean() if analog_count else np.nan
-    downside_probability = (returns <= args.downside_risk).mean() if analog_count else np.nan
-    positive_probability = (returns > 0).mean() if analog_count else np.nan
-    upside_ci_low, upside_ci_high = wilson_interval(upside_probability, effective_n)
-    downside_ci_low, downside_ci_high = wilson_interval(downside_probability, effective_n)
+    effective_n = analog_count
+    baseline_frame = select_non_overlapping_rows(forward_frame, horizon_days, sort_columns=["Start Date"])
+    baseline_returns = baseline_frame["Forward Return"].dropna()
+    base_upside_probability = (baseline_returns >= args.upside_target).mean() if len(baseline_returns) else np.nan
+    base_downside_probability = (baseline_returns <= args.downside_risk).mean() if len(baseline_returns) else np.nan
+    base_positive_probability = (baseline_returns > 0).mean() if len(baseline_returns) else np.nan
+    base_expected_return = baseline_returns.mean() if len(baseline_returns) else np.nan
+
+    raw_upside_probability = (returns >= args.upside_target).mean() if analog_count else np.nan
+    raw_downside_probability = (returns <= args.downside_risk).mean() if analog_count else np.nan
+    raw_positive_probability = (returns > 0).mean() if analog_count else np.nan
+    if analog_count and len(baseline_returns):
+        upside_probability, upside_ci_low, upside_ci_high = shrunk_binomial_estimate(
+            int((returns >= args.upside_target).sum()), analog_count, base_upside_probability, args.prior_strength
+        )
+        downside_probability, downside_ci_low, downside_ci_high = shrunk_binomial_estimate(
+            int((returns <= args.downside_risk).sum()), analog_count, base_downside_probability, args.prior_strength
+        )
+        positive_probability, _, _ = shrunk_binomial_estimate(
+            int((returns > 0).sum()), analog_count, base_positive_probability, args.prior_strength
+        )
+        expected_return = (
+            returns.sum() + args.prior_strength * base_expected_return
+        ) / (analog_count + args.prior_strength)
+    else:
+        upside_probability = downside_probability = positive_probability = np.nan
+        upside_ci_low = upside_ci_high = downside_ci_low = downside_ci_high = np.nan
+        expected_return = np.nan
     shortfall_10 = expected_shortfall(returns, 0.10) if analog_count else np.nan
-    score = decision_score(returns.mean() if analog_count else np.nan, upside_probability, downside_probability, shortfall_10)
+    expected_edge = expected_return - base_expected_return if pd.notna(expected_return) and pd.notna(base_expected_return) else np.nan
+    score = decision_score(expected_edge, upside_probability, downside_probability, shortfall_10)
 
     return {
         "Fund Label": fund_label,
@@ -229,13 +308,22 @@ def summarize_analogs(fund_label, latest_row, horizon_label, horizon_days, analo
         "Upside Target": args.upside_target,
         "Downside Risk": args.downside_risk,
         "Probability >= Upside Target": upside_probability,
+        "Raw Analog Probability >= Upside Target": raw_upside_probability,
+        "Base Probability >= Upside Target": base_upside_probability,
         "Upside Probability CI Low": upside_ci_low,
         "Upside Probability CI High": upside_ci_high,
         "Probability <= Downside Risk": downside_probability,
+        "Raw Analog Probability <= Downside Risk": raw_downside_probability,
+        "Base Probability <= Downside Risk": base_downside_probability,
         "Downside Probability CI Low": downside_ci_low,
         "Downside Probability CI High": downside_ci_high,
         "Probability > 0": positive_probability,
-        "Expected Forward Return": returns.mean() if analog_count else np.nan,
+        "Raw Analog Probability > 0": raw_positive_probability,
+        "Base Probability > 0": base_positive_probability,
+        "Expected Forward Return": expected_return,
+        "Raw Analog Expected Forward Return": returns.mean() if analog_count else np.nan,
+        "Base Expected Forward Return": base_expected_return,
+        "Conditional Expected Edge": expected_edge,
         "Median Forward Return": metric_or_nan(returns, lambda x: x.median()),
         "Forward Return P10": metric_or_nan(returns, lambda x: x.quantile(0.10)),
         "Forward Return P25": metric_or_nan(returns, lambda x: x.quantile(0.25)),
@@ -243,7 +331,10 @@ def summarize_analogs(fund_label, latest_row, horizon_label, horizon_days, analo
         "Forward Return P90": metric_or_nan(returns, lambda x: x.quantile(0.90)),
         "Expected Shortfall 10%": shortfall_10,
         "Analog Count": analog_count,
+        "Candidate Analog Count": analogs.attrs.get("candidate_count", analog_count),
         "Effective Observations": effective_n,
+        "Base Observations": len(baseline_returns),
+        "Prior Strength": args.prior_strength,
         "Confidence Level": confidence_level(analog_count, effective_n, args.min_analogs),
         "Average Analog Distance": analogs["Analog Distance"].mean() if analog_count else np.nan,
         "Nearest Analog Start Date": analogs["Start Date"].iloc[0].date() if analog_count else "",
@@ -274,28 +365,94 @@ def decide(primary_row):
 
     upside = primary_row["Probability >= Upside Target"]
     downside = primary_row["Probability <= Downside Risk"]
+    positive = primary_row["Probability > 0"]
     expected = primary_row["Expected Forward Return"]
+    expected_edge = primary_row.get("Conditional Expected Edge", np.nan)
     confidence = primary_row["Confidence Level"]
     horizon = primary_row["Horizon"]
     analog_count = int(primary_row["Analog Count"])
+    candidate_count = int(primary_row.get("Candidate Analog Count", analog_count))
     target = primary_row["Upside Target"]
     risk = primary_row["Downside Risk"]
+    base_upside = primary_row.get("Base Probability >= Upside Target", np.nan)
+    base_downside = primary_row.get("Base Probability <= Downside Risk", np.nan)
+    upside_ci_low = primary_row.get("Upside Probability CI Low", np.nan)
+    trailing_6m = primary_row.get("Current Trailing Return 6M", np.nan)
+    ema_gap = primary_row.get("Current EMA 50/200 Gap", np.nan)
+    ema_slope = primary_row.get("Current EMA 200 Slope 1M", np.nan)
+    relative_strength = primary_row.get("Cross-Fund Momentum Percentile", np.nan)
 
-    if pd.isna(upside) or pd.isna(downside) or pd.isna(expected):
+    trend_confirmed = all(pd.notna(value) and value > 0 for value in [trailing_6m, ema_gap, ema_slope])
+    broken_trend_count = sum(pd.notna(value) and value < 0 for value in [trailing_6m, ema_gap, ema_slope])
+    relative_strength_ok = pd.isna(relative_strength) or relative_strength >= MIN_CROSS_FUND_MOMENTUM_PERCENTILE
+    relative_strength_weak = pd.notna(relative_strength) and relative_strength <= 0.35
+    conditional_upside_edge = pd.notna(base_upside) and upside >= base_upside + 0.03
+    conditional_downside_edge = pd.notna(base_downside) and downside >= base_downside
+
+    if any(pd.isna(value) for value in [upside, downside, positive, expected, expected_edge]):
         action = "HOLD / WATCH"
-    elif upside >= 0.25 and downside <= 0.20 and expected > 0 and confidence != "LOW":
+    elif (
+        confidence != "LOW"
+        and trend_confirmed
+        and relative_strength_ok
+        and conditional_upside_edge
+        and upside >= 0.25
+        and downside <= 0.15
+        and expected > 0
+        and expected_edge > 0
+        and pd.notna(upside_ci_low)
+        and upside_ci_low >= 0.10
+    ):
         action = "BUY"
-    elif downside >= 0.30 or (expected < 0 and downside > upside):
+    elif (
+        broken_trend_count >= 2
+        and expected_edge < 0
+        and (expected < 0 or relative_strength_weak)
+        and (downside >= 0.15 or positive < 0.45 or conditional_downside_edge)
+    ):
         action = "SELL / AVOID"
     else:
         action = "HOLD / WATCH"
 
+    relative_text = "n/a" if pd.isna(relative_strength) else f"{relative_strength:.0%}"
     reason = (
-        f"{action}: {horizon} analogs show {upside:.1%} chance of +{target:.0%} or better, "
-        f"{downside:.1%} chance of {risk:.0%} or worse, expected return {expected:+.1%}, "
-        f"using {analog_count} analogs with {confidence.lower()} confidence."
+        f"{action}: base-rate-shrunk {horizon} estimate is {upside:.1%} for +{target:.0%} or better and "
+        f"{downside:.1%} for {risk:.0%} or worse; expected return {expected:+.1%}, conditional edge "
+        f"{expected_edge:+.1%}. Trend confirmation={'yes' if trend_confirmed else 'no'}, cross-fund momentum "
+        f"percentile={relative_text}. Based on {analog_count} independent periods selected from "
+        f"{candidate_count} candidates with {confidence.lower()} confidence."
     )
     return action, reason
+
+
+def add_cross_fund_context(dashboard):
+    """Add relative-strength context so weak funds are not favored merely as rebound candidates."""
+    frame = dashboard.copy()
+    if len(frame) <= 1:
+        frame["Cross-Fund Momentum Percentile"] = np.nan
+        return frame
+    return_3m = pd.to_numeric(frame.get("Current Trailing Return 3M"), errors="coerce")
+    return_6m = pd.to_numeric(frame.get("Current Trailing Return 6M"), errors="coerce")
+    volatility = pd.to_numeric(frame.get("Current Annualized Volatility 3M"), errors="coerce").replace(0, np.nan)
+    risk_adjusted = (0.4 * return_3m + 0.6 * return_6m) / volatility
+    frame["Cross-Fund Return 3M Percentile"] = return_3m.rank(pct=True, method="average")
+    frame["Cross-Fund Return 6M Percentile"] = return_6m.rank(pct=True, method="average")
+    frame["Cross-Fund Risk-Adjusted Momentum Percentile"] = risk_adjusted.rank(pct=True, method="average")
+    frame["Cross-Fund Momentum Percentile"] = (
+        0.30 * frame["Cross-Fund Return 3M Percentile"]
+        + 0.50 * frame["Cross-Fund Return 6M Percentile"]
+        + 0.20 * frame["Cross-Fund Risk-Adjusted Momentum Percentile"]
+    )
+    return frame
+
+
+def refresh_dashboard_decisions(dashboard):
+    frame = add_cross_fund_context(dashboard)
+    decisions = frame.apply(decide, axis=1)
+    frame["Decision Label"] = [item[0] for item in decisions]
+    frame["Decision Reason"] = [item[1] for item in decisions]
+    frame["Action Rank"] = frame["Decision Label"].map(ACTION_ORDER).fillna(99)
+    return frame
 
 
 def analyze_one_file(csv_path, args, horizons):
@@ -312,7 +469,7 @@ def analyze_one_file(csv_path, args, horizons):
     for label, days in horizons.items():
         forward_frame = calculate_calendar_forward_return_frame(raw, label, days)
         analogs = nearest_analogs(features, forward_frame, latest_row, label, days, args)
-        detail_rows.append(summarize_analogs(fund_label, latest_row, label, days, analogs, args))
+        detail_rows.append(summarize_analogs(fund_label, latest_row, label, days, analogs, forward_frame, args))
         if not analogs.empty:
             analog_copy = analogs[
                 [
@@ -362,7 +519,7 @@ def format_report_values(df):
         col
         for col in formatted.columns
         if col != "Latest TotalReturn"
-        and any(token in col for token in ["Probability", "Return", "Risk", "Target", "Drawdown", "Volatility", "Gap", "Slope"])
+        and any(token in col for token in ["Probability", "Return", "Risk", "Target", "Drawdown", "Volatility", "Gap", "Slope", "Percentile"])
     ]
     for col in percent_columns:
         if col in formatted.columns and pd.api.types.is_numeric_dtype(formatted[col]):
@@ -397,15 +554,21 @@ def build_html_report(dashboard, details, chart_paths, output_dir, args):
         "Decision Reason",
         "Latest Date",
         "Latest TotalReturn",
+        "Cross-Fund Momentum Percentile",
         "Probability >= Upside Target",
+        "Base Probability >= Upside Target",
         "Probability <= Downside Risk",
+        "Base Probability <= Downside Risk",
         "Probability > 0",
         "Expected Forward Return",
+        "Base Expected Forward Return",
+        "Conditional Expected Edge",
         "Median Forward Return",
         "Forward Return P10",
         "Forward Return P90",
         "Confidence Level",
         "Analog Count",
+        "Candidate Analog Count",
         "Effective Observations",
         "Current Trend State",
         "Current Drawdown From 6M High",
@@ -417,14 +580,19 @@ def build_html_report(dashboard, details, chart_paths, output_dir, args):
         "Fund Label",
         "Horizon",
         "Probability >= Upside Target",
+        "Base Probability >= Upside Target",
         "Probability <= Downside Risk",
+        "Base Probability <= Downside Risk",
         "Probability > 0",
         "Expected Forward Return",
+        "Base Expected Forward Return",
+        "Conditional Expected Edge",
         "Median Forward Return",
         "Forward Return P10",
         "Forward Return P90",
         "Confidence Level",
         "Analog Count",
+        "Candidate Analog Count",
         "Effective Observations",
         "Decision Score",
     ]
@@ -542,7 +710,7 @@ def build_html_report(dashboard, details, chart_paths, output_dir, args):
     <div class="meta">Generated: {html.escape(generated_at)} | Primary horizon: {html.escape(args.primary_horizon)} | Upside target: {args.upside_target:+.0%} | Downside risk: {args.downside_risk:.0%} | {summary_bits}</div>
   </header>
   <main>
-    <p>This dashboard compares today's fund state with similar historical states in the same fund, then summarizes what happened over the forward horizon. It is decision support, not a guarantee.</p>
+    <p>This dashboard compares today's fund state with non-overlapping historical periods, shrinks estimates toward each fund's unconditional base rate, and requires trend plus cross-fund relative-strength confirmation before a BUY. It is decision support, not a guarantee.</p>
     <section>
       <h2>Decision Dashboard</h2>
       <div class="table-wrap">{dataframe_to_html(dashboard, dashboard_columns)}</div>
@@ -777,6 +945,29 @@ def validate_outputs(dashboard, details, analogs, horizons, args):
     if not analogs.empty and analogs["Forward Return"].isna().any():
         errors.append("Analog detail contains rows without known forward returns.")
 
+    if not analogs.empty and {"Fund Label", "Horizon", "Start Date"}.issubset(analogs.columns):
+        for (fund_label, horizon_label), group in analogs.groupby(["Fund Label", "Horizon"]):
+            horizon_days = horizons.get(horizon_label)
+            if not horizon_days:
+                continue
+            min_gap = max(1, int(round(horizon_days * 365.25 / TRADING_DAYS)))
+            gaps = pd.to_datetime(group["Start Date"], errors="coerce").sort_values().diff().dt.days.dropna()
+            if (gaps < min_gap).any():
+                errors.append(f"Overlapping analog periods found for {fund_label} {horizon_label}.")
+
+    buys = dashboard[dashboard.get("Decision Label", pd.Series(dtype=str)).eq("BUY")]
+    if not buys.empty:
+        required_buy_conditions = (
+            pd.to_numeric(buys["Current Trailing Return 6M"], errors="coerce").gt(0)
+            & pd.to_numeric(buys["Current EMA 50/200 Gap"], errors="coerce").gt(0)
+            & pd.to_numeric(buys["Current EMA 200 Slope 1M"], errors="coerce").gt(0)
+            & pd.to_numeric(buys["Cross-Fund Momentum Percentile"], errors="coerce").ge(
+                MIN_CROSS_FUND_MOMENTUM_PERCENTILE
+            )
+        )
+        if not required_buy_conditions.all():
+            errors.append("At least one BUY row fails trend or cross-fund relative-strength confirmation.")
+
     bad_actions = set(dashboard.get("Decision Label", [])) - set(ACTION_ORDER)
     if bad_actions:
         errors.append(f"Unexpected decision labels: {sorted(bad_actions)}")
@@ -797,6 +988,8 @@ def main():
         raise ValueError("--min-analogs and --max-analogs must be positive.")
     if args.max_analogs < args.min_analogs:
         raise ValueError("--max-analogs must be greater than or equal to --min-analogs.")
+    if args.prior_strength < 0:
+        raise ValueError("--prior-strength must be non-negative.")
 
     if args.all:
         csv_paths = sorted(DATA_DIR.glob(args.fund_glob))
@@ -821,6 +1014,7 @@ def main():
     detail_df = pd.concat(details, ignore_index=True)
     analog_df = pd.concat(analog_details, ignore_index=True) if analog_details else pd.DataFrame()
 
+    dashboard_df = refresh_dashboard_decisions(dashboard_df)
     dashboard_df = dashboard_df.sort_values(
         ["Action Rank", "Decision Score", "Probability >= Upside Target"],
         ascending=[True, False, False],

@@ -20,6 +20,11 @@
   "upside_target": 0.15,
   "downside_risk": -0.08,
   "stale_after_days": 10,
+  "forward_decision": {
+    "min_independent_analogs": 6,
+    "max_independent_analogs": 20,
+    "prior_strength": 8
+  },
   "schedule": {
     "task_name": "ManulifeFundDaily",
     "time": "18:30"

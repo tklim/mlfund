@@ -66,8 +66,11 @@ This downloads all configured funds, validates local CSV health, refreshes forwa
 - `outputs/reports/daily_decision_brief.html`
 - `outputs/reports/daily_decision_brief.md`
 - `outputs/reports/data_health.csv`
+- `outputs/reports/fund_decision_scores.csv`
 - `outputs/reports/fund_strategy_best_by_fund.csv`
 - `outputs/reports/operation_run_history.csv`
+
+The daily brief concludes with empirical upside/downside probabilities and separate 0-100 Buy and Sell Evidence Scores. These scores combine forward analog outcomes, expected return, trend state, and GA confirmation, with low-reliability estimates shrunk toward a neutral score of 50.
 
 Preview without running anything:
 
@@ -102,6 +105,8 @@ python scripts/operate.py report
 ```
 
 The strategy review selects the best GA strategy separately for each fund, preserving each fund's own signal, last GA trade date, lookback/offset, EMA pair, annualized return, excess return, Sharpe, and drawdown.
+
+Forward decisions use non-overlapping historical analog periods, shrink conditional estimates toward each fund's unconditional base rate, and compare recent risk-adjusted momentum across all tracked funds. A BUY additionally requires positive 6-month momentum, positive EMA 50/200 structure, a rising EMA 200, and cross-fund momentum at or above the configured threshold. This prevents a depressed NAV or rebound pattern from being treated as sufficient buy evidence.
 
 ### Check Current Output Status
 
