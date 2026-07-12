@@ -1,1 +1,1 @@
-python scripts\operate.py deep-backtest --max-workers 4 
+python scripts\operate.py deep-backtest --max-workers 4
