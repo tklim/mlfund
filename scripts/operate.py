@@ -12,9 +12,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from common import DATA_DIR, REPORTS_DIR, REPO_ROOT, ensure_dir, fund_label_from_data_file, resolve_repo_path, save_csv
+from fund_strategy_review import parse_log_metrics
 
 
 DEFAULT_CONFIG = REPO_ROOT / "config" / "operation.json"
@@ -42,10 +44,14 @@ def validate_config(config):
     forward = config.get("forward_decision", {})
     min_analogs = int(forward.get("min_independent_analogs", 6))
     max_analogs = int(forward.get("max_independent_analogs", 20))
+    prior_strength = float(forward.get("prior_strength", 4.0))
+    forward_method = str(forward.get("method", "dual-relative-v2"))
     if min_analogs <= 0 or max_analogs < min_analogs:
         raise ValueError("forward_decision analog counts must be positive and max must be >= min.")
-    if float(forward.get("prior_strength", 8)) < 0:
+    if prior_strength < 0:
         raise ValueError("forward_decision.prior_strength must be non-negative.")
+    if forward_method not in {"legacy", "dual-relative-v2"}:
+        raise ValueError("forward_decision.method must be legacy or dual-relative-v2.")
 
 
 def cfg_path(config, key):
@@ -62,8 +68,6 @@ def build_refresh_data_command(config):
         "--all",
         "--years",
         config["default_years"],
-        "--manifest",
-        cfg_path(config, "refresh_manifest"),
     )
 
 
@@ -82,6 +86,8 @@ def build_forward_decision_command(config):
         *config["horizons"],
         "--primary-horizon",
         config["primary_horizon"],
+        "--forward-method",
+        forward.get("method", "dual-relative-v2"),
         "--upside-target",
         config["upside_target"],
         "--downside-risk",
@@ -91,7 +97,9 @@ def build_forward_decision_command(config):
         "--max-analogs",
         forward.get("max_independent_analogs", 20),
         "--prior-strength",
-        forward.get("prior_strength", 8),
+        forward.get("prior_strength", 4.0),
+        "--target-scaling",
+        forward.get("target_scaling", "compounded"),
         "--output-dir",
         cfg_path(config, "report_dir"),
         "--chart-dir",
@@ -295,6 +303,38 @@ def read_csv_if_exists(path):
     return pd.read_csv(path)
 
 
+def load_current_ga_by_fund(tunings_dir=None):
+    """Build the current per-fund GA context from the latest final replay."""
+    tunings_dir = Path(tunings_dir or (REPO_ROOT / "outputs" / "tunings"))
+    summaries = sorted(tunings_dir.glob("final_backtest_summary_*.csv"), key=lambda path: path.stat().st_mtime_ns)
+    if not summaries:
+        return pd.DataFrame()
+    frame = pd.read_csv(summaries[-1])
+    if "status" in frame.columns:
+        frame = frame.loc[frame["status"].astype(str).str.lower().eq("completed")].copy()
+    if frame.empty or "fund_label" not in frame.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for _, row in frame.drop_duplicates("fund_label", keep="first").iterrows():
+        parsed = parse_log_metrics(row.get("log_file", ""))
+        rows.append(
+            {
+                "fund_label": row["fund_label"],
+                "ga_signal": row.get("ga_signal", parsed.get("last_trade_signal", "unknown")),
+                "last_trade_date": row.get("last_trade_date", parsed.get("last_trade_date", "")),
+                "adaptive_annualized_return_pct": row.get("adaptive_annualized_return_pct", np.nan),
+                "excess_annualized_return_pct": row.get("excess_annualized_return_pct", np.nan),
+                "sharpe": row.get("sharpe", np.nan),
+                "max_dd_pct": row.get("max_dd_pct", np.nan),
+                "last_short_ema": row.get("short_ema", np.nan),
+                "last_long_ema": row.get("long_ema", np.nan),
+                "source_summary": str(summaries[-1]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def strategy_signal(report_dir):
     md_path = Path(report_dir) / "fund_strategy_review.md"
     if not md_path.exists():
@@ -316,24 +356,21 @@ def bounded(value, lower=0.0, upper=1.0):
 
 
 def build_decision_scores(dashboard, best_by_fund, health):
-    """Combine forward outcomes and GA confirmation into transparent evidence scores.
-
-    Buy/Sell Scores are decision-support indices, not calibrated probabilities.
-    Low effective sample size and stale data shrink scores toward the neutral 50.
-    """
+    """Expose the authoritative forward rating and GA confirmation without re-rating it."""
     columns = [
         "Fund Label",
         "Conclusion",
-        "Buy Score",
-        "Sell Score",
-        "Score Spread",
-        "Upside Probability",
-        "Downside Probability",
-        "Expected Forward Return",
+        "Forward Method Version",
+        "Forward Decision",
+        "Forward Evidence Score",
+        "Relative Upside Probability Lift",
+        "Relative Downside Probability Lift",
         "Evidence Reliability",
         "Effective Observations",
+        "Base Observations",
         "Confidence Level",
         "GA Signal",
+        "GA Agreement",
         "Data Status",
     ]
     if dashboard.empty:
@@ -358,99 +395,57 @@ def build_decision_scores(dashboard, best_by_fund, health):
         strategy = strategy_rows.get(fund, {})
         fund_health = health_rows.get(fund, {})
 
-        upside_probability = bounded(row.get("Probability >= Upside Target", 0.5))
-        downside_probability = bounded(row.get("Probability <= Downside Risk", 0.5))
-        positive_probability = bounded(row.get("Probability > 0", 0.5))
-        expected_return = float(row.get("Expected Forward Return", 0.0) or 0.0)
-        upside_target = max(1e-9, abs(float(row.get("Upside Target", 0.15) or 0.15)))
-        downside_risk = max(1e-9, abs(float(row.get("Downside Risk", -0.08) or -0.08)))
-        expected_buy_support = bounded(expected_return / upside_target)
-        expected_sell_support = bounded(-expected_return / downside_risk)
-
-        trend = str(row.get("Current Trend State", "")).lower()
-        trend_buy_support = {
-            "uptrend": 1.0,
-            "softening uptrend": 0.65,
-            "recovering / mixed": 0.50,
-            "downtrend": 0.0,
-        }.get(trend, 0.5)
-        trend_sell_support = 1.0 - trend_buy_support
-
+        forward_decision = str(row.get("Decision Label", "HOLD / WATCH"))
+        forward_score = pd.to_numeric(pd.Series([row.get("Decision Score")]), errors="coerce").iloc[0]
         ga_signal = str(strategy.get("ga_signal", "unknown"))
         ga_signal_upper = ga_signal.upper()
         if "BUY" in ga_signal_upper or "INVESTED" in ga_signal_upper:
-            ga_buy_support, ga_sell_support = 1.0, 0.0
+            ga_direction = "BUY"
         elif "SELL" in ga_signal_upper or "EXIT" in ga_signal_upper or "CASH" in ga_signal_upper:
-            ga_buy_support, ga_sell_support = 0.0, 1.0
+            ga_direction = "SELL"
         else:
-            ga_buy_support = ga_sell_support = 0.5
+            ga_direction = "NEUTRAL"
 
-        ga_excess = strategy.get("excess_annualized_return_pct", 0.0)
-        ga_quality = bounded(0.5 + (float(ga_excess) / 40.0 if pd.notna(ga_excess) else 0.0))
-
-        raw_buy = 100 * (
-            0.30 * upside_probability
-            + 0.20 * positive_probability
-            + 0.20 * expected_buy_support
-            + 0.10 * trend_buy_support
-            + 0.10 * ga_buy_support
-            + 0.10 * ga_quality
-        )
-        raw_sell = 100 * (
-            0.30 * downside_probability
-            + 0.20 * (1.0 - positive_probability)
-            + 0.20 * expected_sell_support
-            + 0.10 * trend_sell_support
-            + 0.10 * ga_sell_support
-            + 0.10 * (1.0 - ga_quality)
-        )
+        forward_direction = "BUY" if forward_decision == "BUY" else "SELL" if forward_decision == "SELL / AVOID" else "NEUTRAL"
+        if forward_direction == "NEUTRAL" or ga_direction == "NEUTRAL":
+            ga_agreement = "NEUTRAL"
+        elif forward_direction == ga_direction:
+            ga_agreement = "CONFIRM"
+        else:
+            ga_agreement = "CONFLICT"
 
         effective_observations = max(0.0, float(row.get("Effective Observations", 0.0) or 0.0))
+        base_observations = max(0.0, float(row.get("Base Observations", 0.0) or 0.0))
         confidence = str(row.get("Confidence Level", "LOW")).upper()
         confidence_cap = {"LOW": 0.35, "MEDIUM": 0.65, "NORMAL": 1.0}.get(confidence, 0.35)
-        reliability = min(1.0, effective_observations / 20.0, confidence_cap)
+        reliability = min(1.0, effective_observations / 20.0, base_observations / 20.0, confidence_cap)
         data_status = str(fund_health.get("freshness_status", "unknown")).lower()
         if data_status != "fresh":
             reliability *= 0.5
 
-        buy_score = 50.0 + (raw_buy - 50.0) * reliability
-        sell_score = 50.0 + (raw_sell - 50.0) * reliability
-        spread = buy_score - sell_score
-        if data_status not in {"fresh", "unknown"}:
-            conclusion = "DATA WARNING"
-        elif buy_score >= 70 and spread >= 15:
-            conclusion = "STRONG BUY EVIDENCE"
-        elif buy_score >= 60 and spread >= 10:
-            conclusion = "BUY LEAN"
-        elif sell_score >= 70 and spread <= -15:
-            conclusion = "STRONG SELL EVIDENCE"
-        elif sell_score >= 60 and spread <= -10:
-            conclusion = "SELL LEAN"
-        else:
-            conclusion = "HOLD / WATCH"
+        conclusion = "DATA WARNING" if data_status not in {"fresh", "unknown"} else forward_decision
 
         score_rows.append(
             {
                 "Fund Label": fund,
                 "Conclusion": conclusion,
-                "Buy Score": round(buy_score, 1),
-                "Sell Score": round(sell_score, 1),
-                "Score Spread": round(spread, 1),
-                "Upside Probability": upside_probability,
-                "Downside Probability": downside_probability,
-                "Expected Forward Return": expected_return,
+                "Forward Method Version": row.get("Forward Method Version", "unknown"),
+                "Forward Decision": forward_decision,
+                "Forward Evidence Score": forward_score,
+                "Relative Upside Probability Lift": row.get("Relative Upside Probability Lift", np.nan),
+                "Relative Downside Probability Lift": row.get("Relative Downside Probability Lift", np.nan),
                 "Evidence Reliability": round(reliability, 2),
                 "Effective Observations": int(effective_observations),
+                "Base Observations": int(base_observations),
                 "Confidence Level": confidence,
                 "GA Signal": ga_signal,
+                "GA Agreement": ga_agreement,
                 "Data Status": data_status,
             }
         )
 
     scores = pd.DataFrame(score_rows, columns=columns)
-    scores["Conviction"] = scores[["Buy Score", "Sell Score"]].max(axis=1)
-    scores = scores.sort_values(["Conviction", "Score Spread"], ascending=[False, False])
-    return scores.drop(columns="Conviction").reset_index(drop=True)
+    return scores.sort_values(["Evidence Reliability", "Forward Evidence Score"], ascending=[False, False]).reset_index(drop=True)
 
 
 def write_decision_brief(config):
@@ -459,7 +454,9 @@ def write_decision_brief(config):
     dashboard = read_csv_if_exists(report_dir / "fund_forward_decision_dashboard.csv")
     health = read_csv_if_exists(cfg_path(config, "data_health"))
     probability = read_csv_if_exists(report_dir / "fund_probability_cross_fund_summary.csv")
-    best_by_fund = read_csv_if_exists(report_dir / "fund_strategy_best_by_fund.csv")
+    best_by_fund = load_current_ga_by_fund()
+    if not best_by_fund.empty:
+        save_csv(best_by_fund, report_dir / "fund_strategy_best_by_fund.csv")
     decision_scores = build_decision_scores(dashboard, best_by_fund, health)
     score_path = None
     if not decision_scores.empty:
@@ -572,27 +569,29 @@ def write_decision_brief(config):
             values = [str(row[col]) if col == "Fund Label" else fmt_pct(row[col]) for col in cols]
             lines.append("| " + " | ".join(values) + " |")
 
-    lines.extend(["", "## Conclusion: Buy and Sell Evidence", ""])
+    lines.extend(["", "## Authoritative Forward Decision and GA Context", ""])
     if decision_scores.empty:
         lines.append("Decision evidence scores are not available.")
     else:
         lines.extend(
             [
-                "Buy Score and Sell Score are transparent 0-100 evidence indices, not calibrated probabilities. Scores combine conditional forward outcomes, expected return, trend state, and GA confirmation, then shrink toward neutral `50` when effective observations are limited or data is stale.",
+                "The V2 forward decision is authoritative. GA is shown only as CONFIRM, CONFLICT, or NEUTRAL and does not create a second rating.",
                 "",
             ]
         )
         score_cols = [
             "Fund Label",
             "Conclusion",
-            "Buy Score",
-            "Sell Score",
-            "Score Spread",
-            "Upside Probability",
-            "Downside Probability",
-            "Expected Forward Return",
+            "Forward Method Version",
+            "Forward Decision",
+            "Forward Evidence Score",
+            "Relative Upside Probability Lift",
+            "Relative Downside Probability Lift",
             "Evidence Reliability",
             "Effective Observations",
+            "Base Observations",
+            "GA Signal",
+            "GA Agreement",
         ]
         lines.append("| " + " | ".join(score_cols) + " |")
         lines.append("| " + " | ".join(["---"] * len(score_cols)) + " |")
@@ -600,21 +599,21 @@ def write_decision_brief(config):
             values = []
             for col in score_cols:
                 value = row[col]
-                if col in {"Upside Probability", "Downside Probability", "Expected Forward Return", "Evidence Reliability"}:
+                if col in {"Relative Upside Probability Lift", "Relative Downside Probability Lift", "Evidence Reliability"}:
                     value = fmt_pct(value)
-                elif col in {"Buy Score", "Sell Score", "Score Spread"}:
+                elif col == "Forward Evidence Score" and pd.notna(value):
                     value = f"{float(value):.1f}"
                 values.append(str(value))
             lines.append("| " + " | ".join(values) + " |")
 
-        buy_leans = decision_scores[decision_scores["Conclusion"].isin(["BUY LEAN", "STRONG BUY EVIDENCE"])]
-        sell_leans = decision_scores[decision_scores["Conclusion"].isin(["SELL LEAN", "STRONG SELL EVIDENCE"])]
+        buy_leans = decision_scores[decision_scores["Forward Decision"].eq("BUY")]
+        sell_leans = decision_scores[decision_scores["Forward Decision"].eq("SELL / AVOID")]
         lines.extend(
             [
                 "",
-                f"- Buy-evidence candidates: {', '.join(buy_leans['Fund Label']) if not buy_leans.empty else 'none at the current reliability threshold'}.",
-                f"- Sell-evidence candidates: {', '.join(sell_leans['Fund Label']) if not sell_leans.empty else 'none at the current reliability threshold'}.",
-                "- Upside/Downside Probability columns are empirical conditional outcome frequencies. They are the probability estimates; Buy/Sell Scores are synthesis indices.",
+                f"- V2 BUY candidates: {', '.join(buy_leans['Fund Label']) if not buy_leans.empty else 'none'}.",
+                f"- V2 SELL candidates: {', '.join(sell_leans['Fund Label']) if not sell_leans.empty else 'none'}.",
+                "- Absolute +15%/-8% likelihoods remain descriptive; V2 ratings use shrunk P75/P25 lifts and conditional edge.",
             ]
         )
 

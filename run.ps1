@@ -1,6 +1,6 @@
 param(
-    [double[]]$LookbackYears = @(1, 2),
-    [int[]]$OffsetMonths = @(3, 6, 9),
+    [double[]]$LookbackYears = @(1, 2, 3),
+    [int[]]$OffsetMonths = @(3, 6, 9, 12),
     [int]$Population = 10,
     [int]$Generations = 10,
     [string]$GaSearchPreset = "focused",

@@ -713,6 +713,14 @@ def run_one_fund(row, args, run_timestamp):
         buy_hold_return, result_start_date, result_end_date
     )
     excess_annualized = adaptive_annualized - buy_hold_annualized
+    final_position = float(pd.to_numeric(df_result["Position"], errors="coerce").fillna(0).iloc[-1])
+    ga_signal = "BUY/HOLD invested" if final_position > 1e-6 else "SELL/CASH"
+    position_changes = pd.to_numeric(df_result["Position"], errors="coerce").fillna(0).diff().abs() > 1e-9
+    last_trade_date = ""
+    if position_changes.any():
+        last_trade_row = df_result.loc[position_changes].iloc[-1]
+        last_trade_value = last_trade_row.get("Date", last_trade_row.name)
+        last_trade_date = pd.Timestamp(last_trade_value).strftime("%Y-%m-%d")
 
     if use_original_chart:
         import shutil
@@ -791,6 +799,8 @@ def run_one_fund(row, args, run_timestamp):
         f"Max drawdown: {metrics['max_dd']:.2f}%",
         f"Trades: {num_trades}",
         f"Win rate: {win_rate:.2f}%",
+        f"Current GA signal: {ga_signal}",
+        f"Last trade date: {last_trade_date or 'n/a'}",
         "",
         f"Technical chart: {technical_chart}",
         f"Simple chart: {simple_chart}",
@@ -864,6 +874,8 @@ def run_one_fund(row, args, run_timestamp):
         "uptrend_cash_pct": metrics["uptrend_cash_pct"],
         "missed_upside_after_exit_pct": metrics["missed_upside_after_exit_pct"],
         "stop_loss_count": metrics["stop_loss_count"],
+        "ga_signal": ga_signal,
+        "last_trade_date": last_trade_date,
         "log_file": str(log_path),
         "technical_chart_file": str(technical_chart),
         "simple_chart_file": str(simple_chart),

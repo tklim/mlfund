@@ -6,7 +6,6 @@ from datetime import datetime
 import hashlib
 import random
 import warnings
-from contextlib import contextmanager
 warnings.filterwarnings('ignore')
 import signal
 import sys
@@ -21,7 +20,12 @@ import platform
 import socket
 import time
 
-from common import fund_label_from_data_file
+from common import (
+    LEGACY_TOTAL_RETURN_METHOD,
+    NOT_APPLICABLE_TOTAL_RETURN_METHOD,
+    calculate_rsi,
+    infer_total_return_method,
+)
 
 try:
     import yfinance as yf
@@ -60,9 +64,6 @@ DEFAULT_RSI_OVERSOLD_BOUNDS = (10, 40)
 DEFAULT_RSI_OVERBOUGHT_BOUNDS = (60, 90)
 DEFAULT_RSI_PERIOD = 14
 LOCK_RETRY_SCHEDULE_SECONDS = [30, 60, 120]
-HISTORY_LOCK_TIMEOUT_SECONDS = 900
-HISTORY_LOCK_STALE_SECONDS = 1800
-HISTORY_LOCK_POLL_SECONDS = 1
 history_fallback_files = []
 skip_top5_refresh_for_run = False
 
@@ -438,6 +439,7 @@ def build_param_set_id(row):
     keys = [
         "fund_label",
         "price_column",
+        "total_return_method",
         "lookback_years",
         "offset_months",
         "strategy_profile",
@@ -477,40 +479,6 @@ def record_history_fallback(original_path, fallback_path):
         history_fallback_files.append(entry)
 
 
-@contextmanager
-def history_write_lock(purpose):
-    lock_path = TUNINGS_DIR / ".history_write.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    start = time.time()
-    fd = None
-    while True:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, f"pid={os.getpid()} purpose={purpose} started={datetime.now().isoformat()}\n".encode("utf-8"))
-            break
-        except FileExistsError:
-            try:
-                age = time.time() - lock_path.stat().st_mtime
-                if age > HISTORY_LOCK_STALE_SECONDS:
-                    lock_path.unlink()
-                    safe_log(f"Removed stale history write lock: {lock_path}")
-                    continue
-            except FileNotFoundError:
-                continue
-            if time.time() - start > HISTORY_LOCK_TIMEOUT_SECONDS:
-                raise PermissionError(f"Timed out waiting for history write lock: {lock_path}")
-            time.sleep(HISTORY_LOCK_POLL_SECONDS)
-    try:
-        yield
-    finally:
-        if fd is not None:
-            os.close(fd)
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
-
-
 def run_with_lock_resilience(path, writer, purpose):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -518,8 +486,7 @@ def run_with_lock_resilience(path, writer, purpose):
 
     for attempt_index, wait_seconds in enumerate(LOCK_RETRY_SCHEDULE_SECONDS, start=1):
         try:
-            with history_write_lock(purpose):
-                writer(path)
+            writer(path)
             return {
                 "path": str(path),
                 "used_fallback": False,
@@ -534,8 +501,7 @@ def run_with_lock_resilience(path, writer, purpose):
             time.sleep(wait_seconds)
 
     try:
-        with history_write_lock(purpose):
-            writer(path)
+        writer(path)
         return {
             "path": str(path),
             "used_fallback": False,
@@ -549,8 +515,7 @@ def run_with_lock_resilience(path, writer, purpose):
         f"{purpose} still locked after retries: {path}. "
         f"Writing fallback file instead: {fallback_path}"
     )
-    with history_write_lock(purpose):
-        writer(fallback_path)
+    writer(fallback_path)
     record_history_fallback(path, fallback_path)
     return {
         "path": str(fallback_path),
@@ -715,7 +680,8 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
                        long_ema_bounds_value,
                        rsi_oversold_bounds_value=DEFAULT_RSI_OVERSOLD_BOUNDS,
                        rsi_overbought_bounds_value=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
-                       machine_metadata=None):
+                       machine_metadata=None,
+                       total_return_method=NOT_APPLICABLE_TOTAL_RETURN_METHOD):
     machine_metadata = machine_metadata or get_machine_metadata()
     return {
         "run_id": run_id,
@@ -723,6 +689,7 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
         "fund_label": fund_label,
         "data_file": str(csv_path),
         "price_column": price_column,
+        "total_return_method": total_return_method,
         "data_start": format_date(data_start),
         "data_end": format_date(data_end),
         "row_count": row_count,
@@ -774,6 +741,21 @@ def normalize_tuning_history_columns(df):
         df["rsi_overbought"] = DEFAULT_STRATEGY_PARAMETERS["rsi_overbought"]
     if "rsi_period" not in df.columns:
         df["rsi_period"] = DEFAULT_RSI_PERIOD
+    if "total_return_method" not in df.columns:
+        price_columns = df.get("price_column", pd.Series("TotalReturn", index=df.index))
+        df["total_return_method"] = np.where(
+            price_columns.astype(str).eq("TotalReturn"),
+            LEGACY_TOTAL_RETURN_METHOD,
+            NOT_APPLICABLE_TOTAL_RETURN_METHOD,
+        )
+    else:
+        missing_method = df["total_return_method"].fillna("").astype(str).str.strip().eq("")
+        price_columns = df.get("price_column", pd.Series("TotalReturn", index=df.index))
+        df.loc[missing_method, "total_return_method"] = np.where(
+            price_columns.loc[missing_method].astype(str).eq("TotalReturn"),
+            LEGACY_TOTAL_RETURN_METHOD,
+            NOT_APPLICABLE_TOTAL_RETURN_METHOD,
+        )
     return df
 
 
@@ -801,6 +783,7 @@ def refresh_top5_parameter_sets():
     group_cols = [
         "fund_label",
         "price_column",
+        "total_return_method",
         "lookback_years",
         "offset_months",
         "strategy_profile",
@@ -881,13 +864,19 @@ def infer_fund_output_label(csv_file):
     - MAKGCF_GreaterChina_nav_3Y.csv -> MAKGCF_GreaterChina
     """
     stem = Path(csv_file).stem
+    new_name_match = re.search(r"^([A-Za-z0-9]+)_([A-Za-z0-9]+)_nav_", stem, re.IGNORECASE)
+    if new_name_match:
+        fund_code = new_name_match.group(1).upper()
+        short_name = new_name_match.group(2)
+        return f"{fund_code}_{sanitize_label(short_name)}"
+
     legacy_match = re.search(r"manulife_([A-Za-z0-9]+)_nav_", stem, re.IGNORECASE)
     if legacy_match:
         fund_code = legacy_match.group(1).upper()
         short_name = FUND_CODE_TO_SHORT_NAME.get(fund_code, fund_code)
         return f"{fund_code}_{sanitize_label(short_name)}"
 
-    return fund_label_from_data_file(csv_file)
+    return sanitize_label(stem)
 
 
 def ensure_output_dirs():
@@ -1058,24 +1047,6 @@ def download_market_data(symbol, years=2, interval="1d"):
 def calculate_ema(prices, period):
     """Calculate Exponential Moving Average"""
     return prices.ewm(span=period, adjust=False).mean()
-
-def calculate_rsi(prices, period=14):
-    """Calculate Relative Strength Index with proper handling of division by zero"""
-    delta = prices.diff(1)
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=period, min_periods=1).mean()
-    avg_loss = loss.rolling(window=period, min_periods=1).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs.replace([np.inf, -np.inf], np.nan).fillna(0)))
-    # Handle cases where avg_loss == 0
-    rsi[avg_loss == 0] = 100.0
-    # Handle cases where avg_gain == 0 and avg_loss == 0
-    rsi[(avg_gain == 0) & (avg_loss == 0)] = 50.0
-    # Handle NaN (early periods or no movement)
-    rsi = rsi.fillna(50.0)  # Neutral value for no movement
-    return rsi
-
 
 def portfolio_value_from_state(shares, cash, price):
     return (shares * price) + cash
@@ -2182,6 +2153,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 f"Available columns: {list(df_clean.columns)}"
             )
 
+        total_return_method = infer_total_return_method(df_clean, price_col)
+
         if price_col == 'Close':
             df_clean['NAV'] = df_clean['Close']
             cols_to_drop = [col for col in ['High', 'Low', 'Open', 'Volume'] if col in df_clean.columns]
@@ -2203,6 +2176,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
 
         log_print(f"Loading data from {csv_path}...")
         log_print(f"Price data loaded from {price_col}: {len(df_clean)} valid data points")
+        log_print(f"TotalReturn method: {total_return_method}")
         log_print(
             f"Date range: {df_clean.index.min().strftime('%Y-%m-%d')} "
             f"to {df_clean.index.max().strftime('%Y-%m-%d')}"
@@ -2215,6 +2189,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "fund_label": csv_name,
             "data_file": str(csv_path),
             "price_column": price_col,
+            "total_return_method": total_return_method,
             "lookback_years": lookback_years,
             "offset_months": offset_months,
             "strategy_profile": strategy_profile,
@@ -2257,7 +2232,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             long_ema_bounds_value,
             rsi_oversold_bounds_value,
             rsi_overbought_bounds_value,
-            machine_metadata,
+            machine_metadata=machine_metadata,
+            total_return_method=total_return_method,
         )
         strategy_parameter_metadata = build_strategy_parameter_metadata(
             {},

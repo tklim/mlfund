@@ -51,77 +51,6 @@ Downloads all funds in the `TRACKED_FUNDS` list.
 
 The repo includes [backtest-ema-ga10-index.py](C:/Users/tklim/OpenWork/mlfund/scripts/backtest-ema-ga10-index.py), which reads fund CSV files from `data/` and uses `TotalReturn` as the default price series for backtesting.
 
-## Operational Pipeline
-
-Use [operate.py](C:/Users/tklim/OpenWork/mlfund/scripts/operate.py) for repeatable day-to-day operation. Defaults live in [operation.json](C:/Users/tklim/OpenWork/mlfund/config/operation.json), including tracked funds, 5Y data refreshes, `TotalReturn`, holding horizons, and decision thresholds.
-
-### Daily Refresh + Decision Brief
-
-```bash
-python scripts/operate.py daily
-```
-
-This downloads all configured funds, validates local CSV health, refreshes forward-decision/probability/strategy-review reports, regenerates final GA replay charts for all funds, and writes:
-
-- `outputs/reports/daily_decision_brief.html`
-- `outputs/reports/daily_decision_brief.md`
-- `outputs/reports/data_health.csv`
-- `outputs/reports/fund_decision_scores.csv`
-- `outputs/reports/fund_strategy_best_by_fund.csv`
-- `outputs/reports/operation_run_history.csv`
-
-The daily brief concludes with empirical upside/downside probabilities and separate 0-100 Buy and Sell Evidence Scores. These scores combine forward analog outcomes, expected return, trend state, and GA confirmation, with low-reliability estimates shrunk toward a neutral score of 50.
-
-Preview without running anything:
-
-```bash
-python scripts/operate.py daily --dry-run
-```
-
-### Regenerate Reports From Existing Data
-
-```bash
-python scripts/operate.py report
-```
-
-This also runs the final fixed-parameter GA replay with `--top-funds 0`, so the simple and technical charts are regenerated for every fund with an available best GA history row.
-
-### Run Deeper GA Backtests
-
-```bash
-python scripts/operate.py deep-backtest
-```
-
-Run up to four independent deep-backtest sessions in parallel:
-
-```bash
-python scripts/operate.py deep-backtest --max-workers 4
-```
-
-After a deep backtest finishes, regenerate the decision reports:
-
-```bash
-python scripts/operate.py report
-```
-
-The strategy review selects the best GA strategy separately for each fund, preserving each fund's own signal, last GA trade date, lookback/offset, EMA pair, annualized return, excess return, Sharpe, and drawdown.
-
-Forward decisions use non-overlapping historical analog periods, shrink conditional estimates toward each fund's unconditional base rate, and compare recent risk-adjusted momentum across all tracked funds. A BUY additionally requires positive 6-month momentum, positive EMA 50/200 structure, a rising EMA 200, and cross-fund momentum at or above the configured threshold. This prevents a depressed NAV or rebound pattern from being treated as sufficient buy evidence.
-
-### Check Current Output Status
-
-```bash
-python scripts/operate.py status
-```
-
-### Install Windows Scheduler
-
-```bash
-python scripts/operate.py install-scheduler --task-name ManulifeFundDaily --time 18:30
-```
-
-Windows Task Scheduler uses the machine's local time. On this workstation, that is intended to be Malaysia local time.
-
 ### Backtest All Local Fund CSVs
 
 This will automatically find files matching `*_nav_*Y.csv` inside `data/`:
@@ -223,6 +152,79 @@ Backtests still write global histories under `outputs/tunings/`, and also mirror
 python scripts/backfill_fund_outputs.py
 ```
 
+### Conditional Forward Probability Dashboard
+
+Generate a decision-support dashboard that compares each fund's latest state with similar historical states, then summarizes forward-return probabilities for BUY / HOLD / SELL review:
+
+```bash
+python scripts/fund_forward_decision.py --all --validate --charts
+```
+
+The default run analyzes `data/*_nav_5Y.csv` with the authoritative `dual_relative_v2` methodology. Decisions use independent actual-date intervals, shrunk fund-relative P75/P25 probability lifts, conditional return edge, and path-specific momentum confirmation. The `+15%` upside and `-8%` downside fields remain descriptive absolute-threshold statistics rather than V2 decision gates. Outputs are saved to:
+
+- `outputs/reports/fund_forward_decision_dashboard.csv`
+- `outputs/reports/fund_forward_decision_details.csv`
+- `outputs/reports/fund_forward_decision_dashboard.html`
+- `outputs/charts/forward_decision/`
+
+To compare every configured horizon in one visual, add:
+
+```bash
+python scripts/fund_forward_decision.py --all --all-horizon-chart --validate
+```
+
+For a reproducible rolling-origin comparison against the original overlapping-window method:
+
+```bash
+python scripts/validate_forward_decision_methodology.py --all --output-dir outputs/reports
+```
+
+See `FORWARD_DECISION_METHODOLOGY_REVIEW.md` for the equations, decision paths, validation findings, and evidence limitations. The old model remains callable only for comparison:
+
+```bash
+python scripts/fund_forward_decision.py --all --forward-method legacy --validate
+```
+
+### Daily Investment Decision Pipeline
+
+Run the daily investment review to refresh 5Y fund data, analyze the exact refreshed CSV files, and publish the decision dashboard:
+
+```powershell
+.\run_daily_investment_review.ps1
+```
+
+For a safe local dry run that skips downloading and uses the latest existing local 5Y CSVs:
+
+```powershell
+.\run_daily_investment_review.ps1 -SkipDownload
+```
+
+The daily pipeline writes:
+
+- `outputs/reports/fund_forward_decision_dashboard.html`
+- `outputs/reports/fund_forward_decision_dashboard.csv`
+- `outputs/reports/fund_forward_decision_details.csv`
+- `outputs/charts/forward_decision/`
+- dated logs and compact summaries under `outputs/reports/daily/`
+
+Daily runs use a 6M headline decision horizon and include the all-horizon heatmap for 1M/3M/6M/1Y context. Keep slower GA/backtest strategy refreshes on a weekly cadence:
+
+```powershell
+.\run_weekly_strategy_review.ps1
+```
+
+To refresh only the strategy review from existing backtest history:
+
+```powershell
+.\run_weekly_strategy_review.ps1 -SkipBacktest
+```
+
+To also regenerate final fixed-parameter backtest charts:
+
+```powershell
+.\run_weekly_strategy_review.ps1 -RunFinalBacktest
+```
+
 ## Output
 
 CSV files are saved to the `data/` folder with the format:
@@ -235,25 +237,24 @@ CSV files are saved to the `data/` folder with the format:
 | `Date` | Trading date |
 | `NAV` | Net Asset Value (MYR) |
 | `Dividend` | Dividend paid on ex-dividend date (empty if no dividend) |
-| `TotalReturn` | Price-like growth index with dividends reinvested on each ex-dividend date |
+| `TotalReturn` | NAV + cumulative dividends received to date |
 
 ## TotalReturn Calculation
 
-The **TotalReturn** column is anchored to the first NAV and compounds each distribution as though it were immediately reinvested at the ex-dividend-date NAV:
+The **TotalReturn** column is a reinvestment index. A dividend is attached to the next available NAV date when its ex-date is not a NAV date, and the growth factors are compounded:
 
 ```
-TotalReturn[0] = NAV[0]
-TotalReturn[t] = TotalReturn[t-1] × (NAV[t] + Dividend[t]) / NAV[t-1]
+TotalReturn = NAV × cumulative_product(1 + Dividend / NAV)
 ```
 
 **Example:**
 | Date | NAV | Dividend | TotalReturn |
 |------|-----|----------|-------------|
 | 2024-07-26 | 0.4064 | - | 0.4064 |
-| 2024-07-29 | 0.3736 | 0.0365 | **0.4101** |
-| 2024-07-30 | 0.3724 | - | 0.4088 |
+| 2024-07-29 | 0.3736 | 0.0365 | dividend growth factor applied |
+| 2024-07-30 | 0.3724 | - | reinvested index continues |
 
-On 2024-07-29, the NAV dropped when the 0.0365 distribution detached. The daily total-return factor is `(0.3736 + 0.0365) / 0.4064`, preserving the distribution's value and reinvesting it for subsequent periods.
+This method preserves proportional reinvestment rather than adding historical cash dividends to later NAV values. Results produced with the former additive method are not directly comparable.
 
 ## Tracked Funds
 
@@ -302,12 +303,12 @@ mlfund/
 ### Windows Task Scheduler
 Create a scheduled task to run daily:
 ```bash
-schtasks /create /tn "ManulifeFundDownload" /tr "python C:\Users\tklim\OpenWork\mlfund\scripts\download_fund.py" /sc daily /st 18:00
+schtasks /create /tn "MLFundDailyInvestmentReview" /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\tklim\OpenWork\mlfund\run_daily_investment_review.ps1" /sc daily /st 19:00
 ```
 
 ### Cron (Linux/Mac)
 ```bash
-0 18 * * * cd /path/to/mlfund && python scripts/download_fund.py
+0 19 * * * cd /path/to/mlfund && python scripts/daily_investment_review.py
 ```
 
 ## Notes

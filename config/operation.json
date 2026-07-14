@@ -21,9 +21,11 @@
   "downside_risk": -0.08,
   "stale_after_days": 10,
   "forward_decision": {
+    "method": "dual-relative-v2",
     "min_independent_analogs": 6,
     "max_independent_analogs": 20,
-    "prior_strength": 8
+    "prior_strength": 4.0,
+    "target_scaling": "compounded"
   },
   "schedule": {
     "task_name": "ManulifeFundDaily",
@@ -45,7 +47,6 @@
     "decision_brief_md": "outputs/reports/daily_decision_brief.md",
     "decision_brief_html": "outputs/reports/daily_decision_brief.html",
     "data_health": "outputs/reports/data_health.csv",
-    "operation_history": "outputs/reports/operation_run_history.csv",
-    "refresh_manifest": "outputs/reports/fund_refresh_manifest.csv"
+    "operation_history": "outputs/reports/operation_run_history.csv"
   }
 }
