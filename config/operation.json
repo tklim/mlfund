@@ -24,7 +24,7 @@
     "method": "dual-relative-v2",
     "min_independent_analogs": 6,
     "max_independent_analogs": 20,
-    "prior_strength": 8,
+    "prior_strength": 4.0,
     "target_scaling": "compounded"
   },
   "schedule": {

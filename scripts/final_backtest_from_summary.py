@@ -370,6 +370,20 @@ def build_buy_hold_series(df, initial_capital):
     return series, total_return
 
 
+def current_position_context(df_result):
+    """Return the ending signal and last trade date from a completed replay."""
+    if df_result is None or df_result.empty or "Position" not in df_result.columns:
+        return "unknown", ""
+    positions = pd.to_numeric(df_result["Position"], errors="coerce").fillna(0.0)
+    signal = "BUY/HOLD invested" if float(positions.iloc[-1]) > 1e-6 else "SELL/CASH"
+    position_changes = positions.diff().abs() > 1e-9
+    if not position_changes.any():
+        return signal, ""
+    last_trade_row = df_result.loc[position_changes].iloc[-1]
+    last_trade_value = last_trade_row.get("Date", last_trade_row.name)
+    return signal, pd.Timestamp(last_trade_value).strftime("%Y-%m-%d")
+
+
 def format_final_parameter_box(params, price_column, initial_capital):
     ga_pop = params.get("best_ga_pop_size", "")
     ga_gen = params.get("best_ga_generations", "")
@@ -713,14 +727,7 @@ def run_one_fund(row, args, run_timestamp):
         buy_hold_return, result_start_date, result_end_date
     )
     excess_annualized = adaptive_annualized - buy_hold_annualized
-    final_position = float(pd.to_numeric(df_result["Position"], errors="coerce").fillna(0).iloc[-1])
-    ga_signal = "BUY/HOLD invested" if final_position > 1e-6 else "SELL/CASH"
-    position_changes = pd.to_numeric(df_result["Position"], errors="coerce").fillna(0).diff().abs() > 1e-9
-    last_trade_date = ""
-    if position_changes.any():
-        last_trade_row = df_result.loc[position_changes].iloc[-1]
-        last_trade_value = last_trade_row.get("Date", last_trade_row.name)
-        last_trade_date = pd.Timestamp(last_trade_value).strftime("%Y-%m-%d")
+    ga_signal, last_trade_date = current_position_context(df_result_latest)
 
     if use_original_chart:
         import shutil

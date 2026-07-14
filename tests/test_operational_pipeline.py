@@ -164,7 +164,7 @@ class OperationalPipelineTests(unittest.TestCase):
         self.assertNotIn("--upside-target 15", operate.command_text(command))
         self.assertEqual(command[command.index("--min-analogs") + 1], "6")
         self.assertEqual(command[command.index("--max-analogs") + 1], "20")
-        self.assertEqual(command[command.index("--prior-strength") + 1], "8")
+        self.assertEqual(command[command.index("--prior-strength") + 1], "4.0")
 
     def test_forward_confidence_is_low_with_too_few_independent_observations(self):
         self.assertEqual(fund_forward_decision.confidence_level(150, 4, 40), "LOW")
@@ -174,12 +174,13 @@ class OperationalPipelineTests(unittest.TestCase):
         frame = pd.DataFrame(
             {
                 "Start Date": pd.date_range("2020-01-01", periods=18, freq="MS"),
+                "End Date": pd.date_range("2020-01-01", periods=18, freq="MS") + pd.DateOffset(months=3),
                 "Forward Return": range(18),
             }
         )
-        selected = fund_forward_decision.select_non_overlapping_rows(frame, horizon_days=63)
-        gaps = selected["Start Date"].sort_values().diff().dropna().dt.days
-        self.assertTrue((gaps >= 91).all())
+        selected = fund_forward_decision.select_non_overlapping_rows(frame)
+        ordered = selected.sort_values("Start Date")
+        self.assertTrue((ordered["Start Date"].iloc[1:].to_numpy() >= ordered["End Date"].iloc[:-1].to_numpy()).all())
         self.assertLess(len(selected), len(frame))
 
     def test_forward_probability_shrinks_toward_fund_base_rate(self):
@@ -235,6 +236,17 @@ class OperationalPipelineTests(unittest.TestCase):
         self.assertIn("final_backtest_from_summary.py", command[1])
         self.assertEqual(command[command.index("--top-funds") + 1], "0")
         self.assertEqual(command[command.index("--price-column") + 1], "TotalReturn")
+
+    def test_current_ga_context_comes_from_latest_replay_positions(self):
+        frame = pd.DataFrame(
+            {
+                "Date": pd.to_datetime(["2026-07-01", "2026-07-02", "2026-07-03"]),
+                "Position": [0.0, 1.0, 1.0],
+            }
+        )
+        signal, last_trade_date = final_backtest_from_summary.current_position_context(frame)
+        self.assertEqual(signal, "BUY/HOLD invested")
+        self.assertEqual(last_trade_date, "2026-07-02")
 
     def test_latest_dashboard_sorts_funds_and_includes_zoom_controls(self):
         rows = [

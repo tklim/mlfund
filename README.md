@@ -152,6 +152,20 @@ Backtests still write global histories under `outputs/tunings/`, and also mirror
 python scripts/backfill_fund_outputs.py
 ```
 
+### Latest Fixed-Parameter Backtest Dashboard
+
+Replay the best annualized-excess parameter set for every fund against both its original evaluation slice and the latest matching local data:
+
+```bash
+python scripts/final_backtest_from_summary.py --top-funds 0 --price-column TotalReturn
+```
+
+In addition to per-fund charts and the timestamped summary CSV, this creates:
+
+- `outputs/reports/dashboard.html`, with sortable fund cards and zoomable charts;
+- `outputs/reports/dashboard.pdf`, with one fund per landscape page;
+- a latest-replay GA signal and last-trade date for downstream `CONFIRM` / `CONFLICT` / `NEUTRAL` context.
+
 ### Conditional Forward Probability Dashboard
 
 Generate a decision-support dashboard that compares each fund's latest state with similar historical states, then summarizes forward-return probabilities for BUY / HOLD / SELL review:
@@ -236,8 +250,8 @@ CSV files are saved to the `data/` folder with the format:
 |--------|-------------|
 | `Date` | Trading date |
 | `NAV` | Net Asset Value (MYR) |
-| `Dividend` | Dividend paid on ex-dividend date (empty if no dividend) |
-| `TotalReturn` | NAV + cumulative dividends received to date |
+| `Dividend` | Distribution aligned to the next available NAV date |
+| `TotalReturn` | Dividend-reinvested NAV index |
 
 ## TotalReturn Calculation
 
@@ -314,7 +328,8 @@ schtasks /create /tn "MLFundDailyInvestmentReview" /tr "powershell -NoProfile -E
 ## Notes
 
 - Data is fetched for the last **3 years** by default; use `--years 5` to download 5 years
-- Dividend data is merged on ex-dividend dates
+- Dividend ex-dates without NAV observations are aligned to the next available NAV date
+- If the dividend endpoint fails, an existing matching CSV can supply cached dividend rows and the run records a warning
 - If CSV file is locked (open in Excel), script automatically adds timestamp to filename
 - All values in **MYR** (Malaysian Ringgit)
 
