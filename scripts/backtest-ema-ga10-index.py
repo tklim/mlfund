@@ -24,6 +24,7 @@ from common import (
     LEGACY_TOTAL_RETURN_METHOD,
     NOT_APPLICABLE_TOTAL_RETURN_METHOD,
     calculate_rsi,
+    fund_label_from_data_file,
     infer_total_return_method,
 )
 
@@ -864,19 +865,13 @@ def infer_fund_output_label(csv_file):
     - MAKGCF_GreaterChina_nav_3Y.csv -> MAKGCF_GreaterChina
     """
     stem = Path(csv_file).stem
-    new_name_match = re.search(r"^([A-Za-z0-9]+)_([A-Za-z0-9]+)_nav_", stem, re.IGNORECASE)
-    if new_name_match:
-        fund_code = new_name_match.group(1).upper()
-        short_name = new_name_match.group(2)
-        return f"{fund_code}_{sanitize_label(short_name)}"
-
     legacy_match = re.search(r"manulife_([A-Za-z0-9]+)_nav_", stem, re.IGNORECASE)
     if legacy_match:
         fund_code = legacy_match.group(1).upper()
         short_name = FUND_CODE_TO_SHORT_NAME.get(fund_code, fund_code)
         return f"{fund_code}_{sanitize_label(short_name)}"
 
-    return sanitize_label(stem)
+    return fund_label_from_data_file(csv_file)
 
 
 def ensure_output_dirs():

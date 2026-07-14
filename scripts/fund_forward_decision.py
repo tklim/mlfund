@@ -274,9 +274,14 @@ def select_non_overlapping_rows(frame, horizon_days=None, max_rows=None, sort_co
     """Greedily select rows using their actual forward start/end intervals."""
     if frame.empty:
         return frame.head(0).copy()
-    required = {"Start Date", "End Date"}
-    if not required.issubset(frame.columns):
-        raise ValueError(f"Non-overlap selection requires columns: {sorted(required)}")
+    if "Start Date" not in frame.columns:
+        raise ValueError("Non-overlap selection requires a Start Date column.")
+    frame = frame.copy()
+    if "End Date" not in frame.columns:
+        if horizon_days is None:
+            raise ValueError("horizon_days is required when End Date is unavailable.")
+        calendar_days = max(1, int(round(float(horizon_days) * 365.25 / TRADING_DAYS)))
+        frame["End Date"] = pd.to_datetime(frame["Start Date"], errors="coerce") + pd.Timedelta(days=calendar_days)
     ranked = frame.sort_values(sort_columns or ["Start Date"]).copy()
     selected_indices = []
     selected_intervals = []

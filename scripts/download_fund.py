@@ -91,6 +91,11 @@ def request_json(url, description):
         raise FundDownloadError(f"Unable to load {description}: {exc}") from exc
 
 
+def fetch_json(url, *, description):
+    """Compatibility wrapper used by scheduled refresh callers and tests."""
+    return request_json(url, description)
+
+
 def list_payload(payload, description):
     """Normalize API list responses, including the common data wrapper."""
     if isinstance(payload, list) and len(payload) == 1:
@@ -125,15 +130,34 @@ def format_change(change, change_pct):
     return f"{change_value:.4f} ({percent_value:.2f}%)"
 
 
-def get_dividends(fund_id):
-    """Fetch dividend history for a fund."""
+def get_dividends_with_warning(fund_id):
+    """Fetch dividends, preserving a warning so a cached series can be reused."""
     dividends_url = f"{BASE_URL}/funds.dividends.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
     try:
-        response = request_json(dividends_url, f"dividend history for {fund_id}")
-        return list_payload(response, f"Dividend history for {fund_id}")
-    except FundDownloadError as exc:
-        print(f"Warning: unable to load dividend history for {fund_id}: {exc}")
+        response = fetch_json(dividends_url, description=f"dividend history for {fund_id}")
+        return list_payload(response, f"Dividend history for {fund_id}"), ""
+    except Exception as exc:
+        warning = f"unable to load dividend history for {fund_id}: {exc}"
+        print(f"Warning: {warning}")
+        return [], warning
+
+
+def get_dividends(fund_id):
+    """Fetch dividend history for a fund."""
+    return get_dividends_with_warning(fund_id)[0]
+
+
+def load_cached_dividends(path):
+    """Return non-zero dividends from an existing local fund CSV, if available."""
+    try:
+        cached = pd.read_csv(path, usecols=["Date", "Dividend"])
+    except (OSError, ValueError, pd.errors.EmptyDataError):
         return []
+    cached["Dividend"] = pd.to_numeric(cached["Dividend"], errors="coerce").fillna(0.0)
+    return [
+        {"exDividendDate": row["Date"], "dividend": row["Dividend"]}
+        for _, row in cached.loc[cached["Dividend"].ne(0.0)].iterrows()
+    ]
 
 
 def build_total_return_frame(nav_df, dividend_df=None):
@@ -196,19 +220,16 @@ def download_fund(fund_id, years=3):
     # Get fund details
     details_url = f"{BASE_URL}/funds.details.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
     details = details_payload(
-        request_json(details_url, f"fund details for {fund_id}"),
+        fetch_json(details_url, description=f"fund details for {fund_id}"),
         fund_id,
     )
 
     # Get prices
     prices_url = f"{BASE_URL}/funds.prices.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
     prices = list_payload(
-        request_json(prices_url, f"price history for {fund_id}"),
+        fetch_json(prices_url, description=f"NAV prices for {fund_id}"),
         f"Price history for {fund_id}",
     )
-
-    # Get dividends
-    dividends = get_dividends(fund_id)
 
     fund_name = details.get("fundName", "Unknown Fund")
     nav = details.get("nav") or {}
@@ -218,11 +239,29 @@ def download_fund(fund_id, years=3):
     current_date = nav.get("asOfDate")
     change = nav.get("changePrice")
     change_pct = nav.get("changePercent")
+    fund_label = short_fund_label(fund_id, fund_name)
+    cached_path = DATA_DIR / f"{fund_label}_nav_{years}Y.csv"
+
+    dividends, dividend_warning = get_dividends_with_warning(fund_id)
+    dividend_source = "api"
+    if dividend_warning:
+        cached_dividends = load_cached_dividends(cached_path)
+        if cached_dividends:
+            dividends = cached_dividends
+            dividend_source = "cached_existing_file"
+            dividend_warning = (
+                f"{dividend_warning}; reused {len(cached_dividends)} cached dividend row(s) "
+                f"from {cached_path.name}"
+            )
+        else:
+            dividend_source = "unavailable"
 
     print(f"Fund: {fund_name}")
     print(f"Current NAV: {current_price} MYR ({current_date})")
     print(f"Daily Change: {format_change(change, change_pct)}")
     print(f"Dividend Records: {len(dividends)}")
+    if dividend_source != "api":
+        print(f"Dividend Source: {dividend_source}")
 
     # Build NAV dataframe
     nav_data = []
@@ -271,7 +310,6 @@ def download_fund(fund_id, years=3):
     # Save CSV (handle locked files)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    fund_label = short_fund_label(fund_id, fund_name)
     base_file = f"{fund_label}_nav_{years}Y.csv"
     out_path = DATA_DIR / base_file
 
@@ -296,6 +334,8 @@ def download_fund(fund_id, years=3):
         "change": change,
         "change_pct": change_pct,
         "dividend_count": len(dividends),
+        "dividend_source": dividend_source,
+        "warning": dividend_warning,
         "total_return_method": REINVESTED_TOTAL_RETURN_METHOD,
         "records": len(df),
         "output_path": str(out_path),
@@ -306,7 +346,7 @@ def get_fund_summary(fund_id):
     """Get quick fund summary without full price history."""
     details_url = f"{BASE_URL}/funds.details.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
     details = details_payload(
-        request_json(details_url, f"fund details for {fund_id}"),
+        fetch_json(details_url, description=f"fund details for {fund_id}"),
         fund_id,
     )
 
@@ -333,6 +373,23 @@ def get_fund_summary(fund_id):
         "latest_dividend": latest_div.get("dividend") if latest_div else None,
         "dividend_date": latest_div.get("exDividendDate") if latest_div else None,
     }
+
+
+def download_many(fund_ids, years):
+    """Download each fund independently so one failed endpoint does not stop a refresh."""
+    results = []
+    failed = 0
+    for fund_id in fund_ids:
+        try:
+            result = download_fund(fund_id, years=years)
+            result["status"] = "ok_with_warnings" if result.get("warning") else "ok"
+            result["error"] = ""
+        except Exception as exc:
+            failed += 1
+            print(f"ERROR: {fund_id} failed: {exc}")
+            result = {"fund_id": fund_id, "status": "failed", "error": str(exc)}
+        results.append(result)
+    return results, failed
 
 
 if __name__ == "__main__":

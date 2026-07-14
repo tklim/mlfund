@@ -44,7 +44,7 @@ def validate_config(config):
     forward = config.get("forward_decision", {})
     min_analogs = int(forward.get("min_independent_analogs", 6))
     max_analogs = int(forward.get("max_independent_analogs", 20))
-    prior_strength = float(forward.get("prior_strength", 4.0))
+    prior_strength = float(forward.get("prior_strength", 8.0))
     forward_method = str(forward.get("method", "dual-relative-v2"))
     if min_analogs <= 0 or max_analogs < min_analogs:
         raise ValueError("forward_decision analog counts must be positive and max must be >= min.")
@@ -97,7 +97,7 @@ def build_forward_decision_command(config):
         "--max-analogs",
         forward.get("max_independent_analogs", 20),
         "--prior-strength",
-        forward.get("prior_strength", 4.0),
+        forward.get("prior_strength", 8.0),
         "--target-scaling",
         forward.get("target_scaling", "compounded"),
         "--output-dir",

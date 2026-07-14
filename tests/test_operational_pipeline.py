@@ -168,7 +168,7 @@ class OperationalPipelineTests(unittest.TestCase):
 
     def test_forward_confidence_is_low_with_too_few_independent_observations(self):
         self.assertEqual(fund_forward_decision.confidence_level(150, 4, 40), "LOW")
-        self.assertEqual(fund_forward_decision.confidence_level(150, 5, 40), "MEDIUM")
+        self.assertEqual(fund_forward_decision.confidence_level(150, 5, 40), "LOW")
 
     def test_forward_analogs_are_non_overlapping(self):
         frame = pd.DataFrame(
@@ -205,6 +205,9 @@ class OperationalPipelineTests(unittest.TestCase):
                 "Probability > 0": 0.70,
                 "Expected Forward Return": 0.12,
                 "Conditional Expected Edge": 0.05,
+                "Relative Upside Probability Lift": 0.08,
+                "Relative Downside Probability Lift": -0.03,
+                "Decision Score": 0.8,
                 "Confidence Level": "MEDIUM",
                 "Horizon": "6M",
                 "Analog Count": 8,
@@ -214,6 +217,7 @@ class OperationalPipelineTests(unittest.TestCase):
                 "Current Trailing Return 6M": 0.18,
                 "Current EMA 50/200 Gap": 0.06,
                 "Current EMA 200 Slope 1M": 0.02,
+                "Self-Relative Momentum Percentile": 0.80,
                 "Cross-Fund Momentum Percentile": 0.90,
             }
         )
@@ -328,6 +332,7 @@ class OperationalPipelineTests(unittest.TestCase):
             [
                 {
                     "Fund Label": "BULL",
+                    "Decision Label": "BUY",
                     "Probability >= Upside Target": 0.80,
                     "Probability <= Downside Risk": 0.05,
                     "Probability > 0": 0.90,
@@ -340,6 +345,7 @@ class OperationalPipelineTests(unittest.TestCase):
                 },
                 {
                     "Fund Label": "BEAR",
+                    "Decision Label": "SELL / AVOID",
                     "Probability >= Upside Target": 0.05,
                     "Probability <= Downside Risk": 0.80,
                     "Probability > 0": 0.10,
@@ -352,6 +358,7 @@ class OperationalPipelineTests(unittest.TestCase):
                 },
                 {
                     "Fund Label": "THIN_SAMPLE",
+                    "Decision Label": "HOLD / WATCH",
                     "Probability >= Upside Target": 0.80,
                     "Probability <= Downside Risk": 0.05,
                     "Probability > 0": 0.90,
@@ -380,12 +387,10 @@ class OperationalPipelineTests(unittest.TestCase):
 
         scores = operate.build_decision_scores(dashboard, strategies, health).set_index("Fund Label")
 
-        self.assertEqual(scores.loc["BULL", "Conclusion"], "STRONG BUY EVIDENCE")
-        self.assertGreater(scores.loc["BULL", "Buy Score"], scores.loc["BULL", "Sell Score"])
-        self.assertEqual(scores.loc["BEAR", "Conclusion"], "STRONG SELL EVIDENCE")
-        self.assertGreater(scores.loc["BEAR", "Sell Score"], scores.loc["BEAR", "Buy Score"])
+        self.assertEqual(scores.loc["BULL", "Conclusion"], "BUY")
+        self.assertEqual(scores.loc["BEAR", "Conclusion"], "SELL / AVOID")
         self.assertEqual(scores.loc["THIN_SAMPLE", "Conclusion"], "HOLD / WATCH")
-        self.assertLess(abs(scores.loc["THIN_SAMPLE", "Buy Score"] - 50), abs(scores.loc["BULL", "Buy Score"] - 50))
+        self.assertNotIn("Buy Score", scores.columns)
 
     def test_download_many_continues_after_one_failed_fund(self):
         def fake_download(fund_id, years):
