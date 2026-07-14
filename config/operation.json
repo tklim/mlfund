@@ -21,8 +21,11 @@
   "downside_risk": -0.08,
   "stale_after_days": 10,
   "forward_decision": {
+    "method": "dual-relative-v2",
     "min_independent_analogs": 6,
-    "max_independent_analogs": 20
+    "max_independent_analogs": 20,
+    "prior_strength": 4.0,
+    "target_scaling": "compounded"
   },
   "schedule": {
     "task_name": "ManulifeFundDaily",

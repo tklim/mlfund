@@ -8,7 +8,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from common import LEGACY_TOTAL_RETURN_METHOD, REINVESTED_TOTAL_RETURN_METHOD
-from technical_signal_review import select_params_for_fund
+from technical_signal_review import calculate_likelihoods, select_params_for_fund
 
 
 class SelectParamsForFundTests(unittest.TestCase):
@@ -44,6 +44,15 @@ class SelectParamsForFundTests(unittest.TestCase):
         )
 
         self.assertEqual(selected["run_id"], "reinvested")
+
+
+class TechnicalLikelihoodSchemaTests(unittest.TestCase):
+    def test_absolute_names_and_compatibility_aliases_match(self):
+        frame = pd.DataFrame({"Date": pd.date_range("2024-01-01", periods=5), "NAV": [1, 1.1, 1.2, 1.3, 1.4], "Position": 1})
+        row = calculate_likelihoods(frame, "BUY/HOLD invested", {"2D": 2}, 0.10, -0.05, 1)[0]
+        self.assertEqual(row["Technical Likelihood Method"], "absolute_fixed_threshold")
+        self.assertEqual(row["Technical Absolute Probability >= Upside Target"], row["Technical Probability >= Upside Target"])
+        self.assertEqual(row["Technical Absolute Expected Forward Return"], row["Technical Expected Forward Return"])
 
 
 if __name__ == "__main__":

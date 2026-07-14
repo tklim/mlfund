@@ -6,7 +6,7 @@ Automated NAV (Net Asset Value) and dividend data downloader for Manulife Invest
 
 - ✅ Download NAV history from Manulife API (no browser required)
 - ✅ Fetch dividend data and merge with NAV history
-- ✅ Calculate **TotalReturn** = NAV + cumulative dividends received
+- ✅ Calculate a dividend-reinvested **TotalReturn** index
 - ✅ Handle locked CSV files (auto-timestamp fallback)
 - ✅ Support multiple funds tracking
 - ✅ Quick summary mode (no full download)
@@ -160,7 +160,7 @@ Generate a decision-support dashboard that compares each fund's latest state wit
 python scripts/fund_forward_decision.py --all --validate --charts
 ```
 
-The default run analyzes `data/*_nav_5Y.csv`, uses `TotalReturn`, and applies a 6-month primary decision horizon with a `+15%` upside target and `-8%` downside-risk threshold. Outputs are saved to:
+The default run analyzes `data/*_nav_5Y.csv` with the authoritative `dual_relative_v2` methodology. Decisions use independent actual-date intervals, shrunk fund-relative P75/P25 probability lifts, conditional return edge, and path-specific momentum confirmation. The `+15%` upside and `-8%` downside fields remain descriptive absolute-threshold statistics rather than V2 decision gates. Outputs are saved to:
 
 - `outputs/reports/fund_forward_decision_dashboard.csv`
 - `outputs/reports/fund_forward_decision_details.csv`
@@ -171,6 +171,18 @@ To compare every configured horizon in one visual, add:
 
 ```bash
 python scripts/fund_forward_decision.py --all --all-horizon-chart --validate
+```
+
+For a reproducible rolling-origin comparison against the original overlapping-window method:
+
+```bash
+python scripts/validate_forward_decision_methodology.py --all --output-dir outputs/reports
+```
+
+See `FORWARD_DECISION_METHODOLOGY_REVIEW.md` for the equations, decision paths, validation findings, and evidence limitations. The old model remains callable only for comparison:
+
+```bash
+python scripts/fund_forward_decision.py --all --forward-method legacy --validate
 ```
 
 ### Daily Investment Decision Pipeline
@@ -229,20 +241,20 @@ CSV files are saved to the `data/` folder with the format:
 
 ## TotalReturn Calculation
 
-The **TotalReturn** column represents the total value if you held the fund, including reinvested dividends:
+The **TotalReturn** column is a reinvestment index. A dividend is attached to the next available NAV date when its ex-date is not a NAV date, and the growth factors are compounded:
 
 ```
-TotalReturn = NAV + Σ(Dividends received to date)
+TotalReturn = NAV × cumulative_product(1 + Dividend / NAV)
 ```
 
 **Example:**
 | Date | NAV | Dividend | TotalReturn |
 |------|-----|----------|-------------|
 | 2024-07-26 | 0.4064 | - | 0.4064 |
-| 2024-07-29 | 0.3736 | 0.0365 | **0.4101** |
-| 2024-07-30 | 0.3724 | - | 0.4089 |
+| 2024-07-29 | 0.3736 | 0.0365 | dividend growth factor applied |
+| 2024-07-30 | 0.3724 | - | reinvested index continues |
 
-On 2024-07-29, the NAV dropped from 0.4064 to 0.3736 (dividend detached), but you received 0.0365 in cash. Total value = 0.3736 + 0.0365 = **0.4101**.
+This method preserves proportional reinvestment rather than adding historical cash dividends to later NAV values. Results produced with the former additive method are not directly comparable.
 
 ## Tracked Funds
 

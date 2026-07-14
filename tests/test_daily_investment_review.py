@@ -58,5 +58,13 @@ class DailyFailureTests(unittest.TestCase):
         write_outputs.assert_not_called()
 
 
+class DailyMergeValidationTests(unittest.TestCase):
+    def test_duplicate_fund_labels_are_rejected(self):
+        frame = daily.pd.DataFrame({"Fund Label": ["APCR", "APCR"]})
+
+        with self.assertRaisesRegex(ValueError, "duplicate fund labels"):
+            daily.require_unique_fund_labels(frame, "Test report")
+
+
 if __name__ == "__main__":
     unittest.main()

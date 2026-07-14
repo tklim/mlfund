@@ -27,6 +27,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DATA_DIR = REPO_ROOT / "data"
 TRACKED_FUNDS = ["MAUS_RMH", "MGPRH", "MIIEH", "MAPF", "MGLVH", "MAKGCF", "HWFL", "MAPAC", "APCR", "MSGLR_RM", "MPGFC"]
+REQUEST_TIMEOUT_SECONDS = 30
+
+
+class FundDownloadError(RuntimeError):
+    """Raised when required fund API data cannot be loaded or validated."""
 
 
 def parse_args():
@@ -76,24 +81,59 @@ def short_fund_label(fund_id, fund_name):
     return f"{fund_id}_{sanitize_label(short_name)}"
 
 
+def request_json(url, description):
+    """Fetch required JSON with bounded network time and clear errors."""
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        return response.json()
+    except (RequestException, ValueError) as exc:
+        raise FundDownloadError(f"Unable to load {description}: {exc}") from exc
+
+
+def list_payload(payload, description):
+    """Normalize API list responses, including the common data wrapper."""
+    if isinstance(payload, list) and len(payload) == 1:
+        first = payload[0]
+        if isinstance(first, dict) and "data" in first:
+            payload = first["data"]
+    elif isinstance(payload, dict) and "data" in payload:
+        payload = payload["data"]
+    if not isinstance(payload, list):
+        raise FundDownloadError(f"{description} returned an unexpected payload type.")
+    return payload
+
+
+def details_payload(payload, fund_id):
+    """Normalize and validate a fund-details response."""
+    if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], dict):
+        payload = payload[0].get("data", payload[0])
+    if not isinstance(payload, dict):
+        raise FundDownloadError(f"Fund details for {fund_id} returned an unexpected payload type.")
+    return payload
+
+
+def format_change(change, change_pct):
+    """Format a daily change safely when either API value is unavailable."""
+    try:
+        change_value = float(change)
+        percent_value = float(change_pct)
+    except (TypeError, ValueError):
+        return "n/a"
+    if pd.isna(change_value) or pd.isna(percent_value):
+        return "n/a"
+    return f"{change_value:.4f} ({percent_value:.2f}%)"
+
+
 def get_dividends(fund_id):
     """Fetch dividend history for a fund."""
     dividends_url = f"{BASE_URL}/funds.dividends.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
     try:
-        response = requests.get(dividends_url, headers=HEADERS, timeout=30)
-        response.raise_for_status()
-        response = response.json()
-    except (RequestException, ValueError) as exc:
+        response = request_json(dividends_url, f"dividend history for {fund_id}")
+        return list_payload(response, f"Dividend history for {fund_id}")
+    except FundDownloadError as exc:
         print(f"Warning: unable to load dividend history for {fund_id}: {exc}")
         return []
-
-    # Handle list with data field - the API returns [ {"data": [...]} ]
-    if isinstance(response, list) and len(response) > 0:
-        response = response[0]
-
-    if isinstance(response, dict) and "data" in response:
-        return response["data"]
-    return response if isinstance(response, list) else []
 
 
 def build_total_return_frame(nav_df, dividend_df=None):
@@ -155,17 +195,25 @@ def download_fund(fund_id, years=3):
 
     # Get fund details
     details_url = f"{BASE_URL}/funds.details.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
-    details = requests.get(details_url, headers=HEADERS).json()
+    details = details_payload(
+        request_json(details_url, f"fund details for {fund_id}"),
+        fund_id,
+    )
 
     # Get prices
     prices_url = f"{BASE_URL}/funds.prices.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
-    prices = requests.get(prices_url, headers=HEADERS).json()
+    prices = list_payload(
+        request_json(prices_url, f"price history for {fund_id}"),
+        f"Price history for {fund_id}",
+    )
 
     # Get dividends
     dividends = get_dividends(fund_id)
 
     fund_name = details.get("fundName", "Unknown Fund")
-    nav = details.get("nav", {})
+    nav = details.get("nav") or {}
+    if not isinstance(nav, dict):
+        nav = {}
     current_price = nav.get("price")
     current_date = nav.get("asOfDate")
     change = nav.get("changePrice")
@@ -173,26 +221,32 @@ def download_fund(fund_id, years=3):
 
     print(f"Fund: {fund_name}")
     print(f"Current NAV: {current_price} MYR ({current_date})")
-    if change:
-        print(f"Daily Change: {change:.4f} ({change_pct:.2f}%)")
+    print(f"Daily Change: {format_change(change, change_pct)}")
     print(f"Dividend Records: {len(dividends)}")
 
     # Build NAV dataframe
     nav_data = []
     for p in prices:
+        if not isinstance(p, dict):
+            continue
         date = p.get("asOfDate")
         price = p.get("price")
         if date and price:
             nav_data.append({"Date": date, "NAV": price})
 
-    df = pd.DataFrame(nav_data)
-    df = df.drop_duplicates(subset=["Date"], keep="last")
-    df = df.sort_values("Date")
-    df["Date"] = pd.to_datetime(df["Date"])
+    if not nav_data:
+        raise FundDownloadError(f"No valid NAV price rows were returned for {fund_id}.")
+    df = pd.DataFrame(nav_data, columns=["Date", "NAV"])
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])
 
     # Filter to specified years
     cutoff = datetime.now() - pd.DateOffset(years=years)
     df = df[df["Date"] >= cutoff]
+    if df.empty:
+        raise FundDownloadError(
+            f"No valid NAV price rows for {fund_id} fall within the requested {years}-year window."
+        )
 
     # Prepare dividend data
     div_list = []
@@ -251,14 +305,19 @@ def download_fund(fund_id, years=3):
 def get_fund_summary(fund_id):
     """Get quick fund summary without full price history."""
     details_url = f"{BASE_URL}/funds.details.json?productLine=mf&overrideLocale=en_MY&classId={fund_id}"
-    details = requests.get(details_url, headers=HEADERS).json()
+    details = details_payload(
+        request_json(details_url, f"fund details for {fund_id}"),
+        fund_id,
+    )
 
     # Get latest dividend
     dividends = get_dividends(fund_id)
     latest_div = dividends[0] if dividends else None
 
     fund_name = details.get("fundName", "Unknown")
-    nav = details.get("nav", {})
+    nav = details.get("nav") or {}
+    if not isinstance(nav, dict):
+        nav = {}
     price = nav.get("price")
     date = nav.get("asOfDate")
     change = nav.get("changePrice")
@@ -284,8 +343,14 @@ if __name__ == "__main__":
     if args.summary:
         print("Fund Summary:")
         summary_funds = args.fund_ids if args.fund_ids else TRACKED_FUNDS
+        summary_failures = []
         for fid in summary_funds:
-            s = get_fund_summary(fid)
+            try:
+                s = get_fund_summary(fid)
+            except FundDownloadError as exc:
+                summary_failures.append((fid, str(exc)))
+                print(f"Warning: skipping {fid}: {exc}")
+                continue
             div = (
                 f", Div: {s['latest_dividend']} ({s['dividend_date']})"
                 if s["latest_dividend"]
@@ -294,7 +359,7 @@ if __name__ == "__main__":
             print(
                 f"{s['fund_id']}: {s['fund_name']} - {s['nav']} MYR ({s['date']}){div}"
             )
-        sys.exit(0)
+        sys.exit(1 if summary_failures else 0)
 
     if args.all:
         funds_to_download = TRACKED_FUNDS
@@ -307,8 +372,13 @@ if __name__ == "__main__":
         print(f"Downloading default funds for {args.years}Y: {TRACKED_FUNDS}")
 
     results = []
+    failures = []
     for fid in funds_to_download:
-        results.append(download_fund(fid, years=args.years))
+        try:
+            results.append(download_fund(fid, years=args.years))
+        except (FundDownloadError, ValueError) as exc:
+            failures.append((fid, str(exc)))
+            print(f"Warning: skipping {fid}: {exc}")
 
     if not args.fund_ids or args.all:
         print(f"\n{'=' * 50}")
@@ -317,6 +387,9 @@ if __name__ == "__main__":
         for r in results:
             print(f"{r['fund_id']}: {r['fund_name']}")
             print(f"  NAV: {r['current_nav']} MYR ({r['current_date']})")
-            print(f"  Change: {r['change']:.4f} ({r['change_pct']:.2f}%)")
+            print(f"  Change: {format_change(r['change'], r['change_pct'])}")
             print(f"  Dividends: {r['dividend_count']}")
             print(f"  Records: {r['records']}")
+    if failures:
+        print(f"Completed with {len(failures)} failed fund(s).")
+        sys.exit(1)

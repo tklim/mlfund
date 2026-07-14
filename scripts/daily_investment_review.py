@@ -193,6 +193,14 @@ def read_technical_review(report_dir):
     return path, pd.read_csv(path)
 
 
+def require_unique_fund_labels(frame, report_name):
+    if "Fund Label" not in frame.columns:
+        raise ValueError(f"{report_name} is missing the Fund Label column.")
+    duplicates = frame.loc[frame["Fund Label"].duplicated(False), "Fund Label"].dropna().unique()
+    if len(duplicates):
+        raise ValueError(f"{report_name} contains duplicate fund labels: {sorted(duplicates)}")
+
+
 def write_csv(rows, path, fieldnames):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -309,15 +317,19 @@ def generate_daily_html(run_id, args, combined, download_results, paths):
 
     daily_columns = [
         "Fund Label",
+        "Forward Method Version",
         "Decision Label",
         "Technical State",
         "Agreement",
         "Probability >= Upside Target",
         "Probability <= Downside Risk",
         "Expected Forward Return",
-        "Technical Probability >= Upside Target",
-        "Technical Probability <= Downside Risk",
-        "Technical Expected Forward Return",
+        "Conditional Expected Edge",
+        "Relative Upside Probability Lift",
+        "Relative Downside Probability Lift",
+        "Technical Absolute Probability >= Upside Target",
+        "Technical Absolute Probability <= Downside Risk",
+        "Technical Absolute Expected Forward Return",
         "Last Signal Action",
         "Last Signal Date",
         "Technical Confidence",
@@ -325,13 +337,23 @@ def generate_daily_html(run_id, args, combined, download_results, paths):
     ]
     probability_columns = [
         "Fund Label",
+        "Forward Method Version",
         "Decision Reason",
         "Probability > 0",
         "Probability >= Upside Target",
         "Probability <= Downside Risk",
         "Expected Forward Return",
+        "Relative Upside Threshold (P75)",
+        "Relative Upside Probability",
+        "Base Relative Upside Probability",
+        "Relative Upside Probability Lift",
+        "Relative Downside Threshold (P25)",
+        "Relative Downside Probability",
+        "Base Relative Downside Probability",
+        "Relative Downside Probability Lift",
         "Confidence Level",
         "Analog Count",
+        "Base Observations",
     ]
     technical_columns = [
         "Fund Label",
@@ -340,8 +362,8 @@ def generate_daily_html(run_id, args, combined, download_results, paths):
         "Last Signal Date",
         "Days Since Last Signal",
         "Technical Probability > 0",
-        "Technical Probability >= Upside Target",
-        "Technical Probability <= Downside Risk",
+        "Technical Absolute Probability >= Upside Target",
+        "Technical Absolute Probability <= Downside Risk",
         "Technical Observation Count",
         "Technical Confidence",
         "Selected Short EMA",
@@ -403,7 +425,8 @@ def generate_daily_html(run_id, args, combined, download_results, paths):
 {render_technical_chart_gallery(combined)}
 <h2>Probability Detail</h2>
 {render_table(combined, probability_columns)}
-<h2>Technical Signal Detail</h2>
+<h2>Absolute-Threshold Technical Likelihood</h2>
+<p class="subtle">Separate model for descriptive likelihoods; these fields are not inputs to the V2 forward decision.</p>
 {render_table(combined, technical_columns)}
 <h2>Data Files</h2>
 {render_table(download_rows, ['fund_id', 'fund_label', 'current_date', 'records', 'output_path', 'mode'])}
@@ -506,12 +529,15 @@ def write_daily_outputs(run_id, args, download_results, log_path):
 
     dashboard_path, dashboard = read_dashboard(args.report_dir)
     technical_path, technical = read_technical_review(args.report_dir)
+    require_unique_fund_labels(dashboard, "Forward decision dashboard")
+    require_unique_fund_labels(technical, "Technical signal review")
     combined = dashboard.merge(technical, on="Fund Label", how="left", suffixes=("", " Technical"))
     combined["Agreement"] = combined.apply(agreement_label, axis=1)
 
     summary_path = daily_dir / f"daily_decision_summary_{run_id}.csv"
     summary_columns = [
         "Fund Label",
+        "Forward Method Version",
         "Decision Label",
         "Technical State",
         "Agreement",
@@ -519,9 +545,12 @@ def write_daily_outputs(run_id, args, download_results, log_path):
         "Probability >= Upside Target",
         "Probability <= Downside Risk",
         "Expected Forward Return",
-        "Technical Probability >= Upside Target",
-        "Technical Probability <= Downside Risk",
-        "Technical Expected Forward Return",
+        "Conditional Expected Edge",
+        "Relative Upside Probability Lift",
+        "Relative Downside Probability Lift",
+        "Technical Absolute Probability >= Upside Target",
+        "Technical Absolute Probability <= Downside Risk",
+        "Technical Absolute Expected Forward Return",
         "Last Signal Action",
         "Last Signal Date",
         "Technical Confidence",
