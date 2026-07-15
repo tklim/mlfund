@@ -26,7 +26,7 @@ powershell -ExecutionPolicy Bypass -File scripts/sync_backtest_history.ps1
 
 The helper configures the merge driver, commits only the history, pulls with a
 merge (which unions concurrent rows), and pushes. It stops before pulling if
-any unrelated tracked files are modified, preventing accidental overwrites.
+any unrelated working-tree files are changed, preventing accidental overwrites.
 
 For a manual workflow, first commit the history, then use `git pull --no-rebase`
 (not `--ff-only`) and `git push`. Do not use `git checkout --` or a hard reset

@@ -13,11 +13,11 @@ Set-Location $repoRoot
 & "$PSScriptRoot\setup_git_sync.ps1"
 $history = 'outputs/tunings/backtest_run_history.csv'
 
-# Refuse to pull over unrelated tracked edits. This preserves work from either
-# machine; commit, stash, or resolve those edits separately first.
+# Refuse to pull over unrelated working-tree edits. This preserves work from
+# either machine; commit, stash, or resolve those edits separately first.
 $otherChanges = @(git status --porcelain | Where-Object { $_.Substring(3) -ne $history })
 if ($otherChanges.Count -gt 0) {
-    Write-Error "Refusing to sync over unrelated tracked changes. Preserve them first, then rerun.\n$($otherChanges -join "`n")"
+    Write-Error "Refusing to sync over unrelated working-tree changes. Preserve them first, then rerun.\n$($otherChanges -join "`n")"
 }
 
 git add -- $history
