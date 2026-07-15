@@ -4,7 +4,12 @@ __pycache__/
 venv/
 
 # Generated analysis outputs
-outputs/
+# Keep the shared, append-only run history in Git. All other generated outputs
+# remain local-only.
+outputs/*
+!outputs/tunings/
+outputs/tunings/*
+!outputs/tunings/backtest_run_history.csv
 totalreturn_summary.csv
 historical_forward_return_probabilities.csv
 lognormal_model_probabilities.csv

@@ -1,0 +1,2 @@
+# The backtest history is append-only and is merged by row, not by line.
+outputs/tunings/backtest_run_history.csv merge=backtest-run-history
