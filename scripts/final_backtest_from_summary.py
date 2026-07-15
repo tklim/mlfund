@@ -1037,41 +1037,42 @@ def write_latest_dashboard(results, run_timestamp):
 def write_latest_pdf(results):
     completed = sorted_latest_results(results)
     pdf_path = REPORTS_DIR / "dashboard.pdf"
-    with PdfPages(pdf_path) as pdf:
-        for rank, row in enumerate(completed, start=1):
-            chart_path = Path(row["latest_chart_file"])
-            if not chart_path.exists():
-                continue
 
-            figure = plt.figure(figsize=(11.69, 8.27), facecolor="white")
-            fund_label = str(row.get("fund_label", "Unknown fund"))
-            annualized = safe_float(row, "latest_adaptive_annualized_return_pct", np.nan)
-            figure.text(0.045, 0.948, f"#{rank}  {fund_label}", fontsize=17, fontweight="bold", color="#172033", va="top")
-            figure.text(
-                0.955,
-                0.948,
-                f"Annual return {annualized:+.2f}%" if np.isfinite(annualized) else "Annual return n/a",
-                fontsize=15,
-                fontweight="bold",
-                color="#176b5b",
-                ha="right",
-                va="top",
-            )
-            metrics_line = (
-                f"Fund return {safe_float(row, 'latest_adaptive_return_pct', np.nan):+.2f}%    |    "
-                f"Buy & hold annualized {safe_float(row, 'latest_buy_hold_annualized_return_pct', np.nan):+.2f}%    |    "
-                f"Excess annualized {safe_float(row, 'latest_excess_annualized_return_pct', np.nan):+.2f}%    |    "
-                f"Max drawdown {safe_float(row, 'latest_max_dd_pct', np.nan):.2f}%    |    "
-                f"Through {row.get('latest_data_end', 'n/a')}"
-            )
-            figure.text(0.045, 0.895, metrics_line, fontsize=9.5, color="#596579", va="top")
+    def write_pdf(path):
+        with PdfPages(path) as pdf:
+            for rank, row in enumerate(completed, start=1):
+                chart_path = Path(row["latest_chart_file"])
+                if not chart_path.exists():
+                    continue
 
-            chart_axis = figure.add_axes([0.035, 0.035, 0.93, 0.82])
-            chart_axis.imshow(plt.imread(chart_path))
-            chart_axis.set_axis_off()
-            pdf.savefig(figure)
-            plt.close(figure)
-    return pdf_path
+                figure = plt.figure(figsize=(11.69, 8.27), facecolor="white")
+                fund_label = str(row.get("fund_label", "Unknown fund"))
+                annualized = safe_float(row, "latest_adaptive_annualized_return_pct", np.nan)
+                figure.text(0.045, 0.948, f"#{rank}  {fund_label}", fontsize=17, fontweight="bold", color="#172033", va="top")
+                figure.text(0.955, 0.948, f"Annual return {annualized:+.2f}%" if np.isfinite(annualized) else "Annual return n/a", fontsize=15, fontweight="bold", color="#176b5b", ha="right", va="top")
+                metrics_line = (
+                    f"Fund return {safe_float(row, 'latest_adaptive_return_pct', np.nan):+.2f}%    |    "
+                    f"Buy & hold annualized {safe_float(row, 'latest_buy_hold_annualized_return_pct', np.nan):+.2f}%    |    "
+                    f"Excess annualized {safe_float(row, 'latest_excess_annualized_return_pct', np.nan):+.2f}%    |    "
+                    f"Max drawdown {safe_float(row, 'latest_max_dd_pct', np.nan):.2f}%    |    "
+                    f"Through {row.get('latest_data_end', 'n/a')}"
+                )
+                figure.text(0.045, 0.895, metrics_line, fontsize=9.5, color="#596579", va="top")
+
+                chart_axis = figure.add_axes([0.035, 0.035, 0.93, 0.82])
+                chart_axis.imshow(plt.imread(chart_path))
+                chart_axis.set_axis_off()
+                pdf.savefig(figure)
+                plt.close(figure)
+
+    try:
+        write_pdf(pdf_path)
+        return pdf_path
+    except PermissionError:
+        fallback = REPORTS_DIR / f"dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        write_pdf(fallback)
+        print(f"Warning: {pdf_path} is locked. Saved PDF to {fallback}")
+        return fallback
 
 
 def main():
