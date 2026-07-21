@@ -16,6 +16,16 @@ lognormal_model_probabilities.csv
 data/*_nav_*_20*.csv
 data/*_nav_*Y.csv
 
+# The dashboard is a separate repository (tklim/fund-signal-dashboard) that is
+# checked out here for convenience. It is versioned there, not in this repo.
+dashboard/
+
+# Local run wrappers, logs and ad-hoc backups
+*.local.bat
+scripts/r1.bat
+run*.log
+backup-*.zip
+
 # Local editor/system files
 .DS_Store
 Thumbs.db
