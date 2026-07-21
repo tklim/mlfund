@@ -20,6 +20,9 @@ data/*_nav_*Y.csv
 # checked out here for convenience. It is versioned there, not in this repo.
 dashboard/
 
+# Downloaded source factsheets, re-obtainable from the fund provider
+fund_factsheet/
+
 # Local run wrappers, logs and ad-hoc backups
 *.local.bat
 scripts/r1.bat
