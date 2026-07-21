@@ -303,6 +303,12 @@ def read_csv_if_exists(path):
     return pd.read_csv(path)
 
 
+def latest_replay_value(row, latest_key, fallback_key):
+    """Prefer a full-data replay metric while supporting older summary files."""
+    value = row.get(latest_key, np.nan)
+    return row.get(fallback_key, np.nan) if pd.isna(value) else value
+
+
 def load_current_ga_by_fund(tunings_dir=None):
     """Build the current per-fund GA context from the latest final replay."""
     tunings_dir = Path(tunings_dir or (REPO_ROOT / "outputs" / "tunings"))
@@ -323,10 +329,14 @@ def load_current_ga_by_fund(tunings_dir=None):
                 "fund_label": row["fund_label"],
                 "ga_signal": row.get("ga_signal", parsed.get("last_trade_signal", "unknown")),
                 "last_trade_date": row.get("last_trade_date", parsed.get("last_trade_date", "")),
-                "adaptive_annualized_return_pct": row.get("adaptive_annualized_return_pct", np.nan),
-                "excess_annualized_return_pct": row.get("excess_annualized_return_pct", np.nan),
-                "sharpe": row.get("sharpe", np.nan),
-                "max_dd_pct": row.get("max_dd_pct", np.nan),
+                "adaptive_annualized_return_pct": latest_replay_value(
+                    row, "latest_adaptive_annualized_return_pct", "adaptive_annualized_return_pct"
+                ),
+                "excess_annualized_return_pct": latest_replay_value(
+                    row, "latest_excess_annualized_return_pct", "excess_annualized_return_pct"
+                ),
+                "sharpe": latest_replay_value(row, "latest_sharpe", "sharpe"),
+                "max_dd_pct": latest_replay_value(row, "latest_max_dd_pct", "max_dd_pct"),
                 "last_short_ema": row.get("short_ema", np.nan),
                 "last_long_ema": row.get("long_ema", np.nan),
                 "source_summary": str(summaries[-1]),

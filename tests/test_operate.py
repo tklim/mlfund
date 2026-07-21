@@ -39,11 +39,34 @@ class ForwardAuthorityTests(unittest.TestCase):
                     "ga_signal": "BUY/HOLD invested", "last_trade_date": "2026-07-01",
                     "adaptive_annualized_return_pct": 5.0, "excess_annualized_return_pct": 1.0,
                     "sharpe": 0.5, "max_dd_pct": -4.0, "short_ema": 10, "long_ema": 50,
+                    "latest_adaptive_annualized_return_pct": 8.0,
+                    "latest_excess_annualized_return_pct": 2.0,
+                    "latest_sharpe": 0.8, "latest_max_dd_pct": 6.0,
                 }]
             ).to_csv(root / "final_backtest_summary_20260713.csv", index=False)
             result = load_current_ga_by_fund(root).iloc[0]
         self.assertEqual(result["ga_signal"], "BUY/HOLD invested")
         self.assertEqual(result["last_trade_date"], "2026-07-01")
+        self.assertEqual(result["adaptive_annualized_return_pct"], 8.0)
+        self.assertEqual(result["excess_annualized_return_pct"], 2.0)
+        self.assertEqual(result["sharpe"], 0.8)
+        self.assertEqual(result["max_dd_pct"], 6.0)
+
+    def test_ga_context_falls_back_for_older_final_replays(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pd.DataFrame(
+                [{
+                    "status": "completed", "fund_label": "A",
+                    "adaptive_annualized_return_pct": 5.0, "excess_annualized_return_pct": 1.0,
+                    "sharpe": 0.5, "max_dd_pct": 4.0,
+                }]
+            ).to_csv(root / "final_backtest_summary_20260713.csv", index=False)
+            result = load_current_ga_by_fund(root).iloc[0]
+        self.assertEqual(result["adaptive_annualized_return_pct"], 5.0)
+        self.assertEqual(result["excess_annualized_return_pct"], 1.0)
+        self.assertEqual(result["sharpe"], 0.5)
+        self.assertEqual(result["max_dd_pct"], 4.0)
 
 
 if __name__ == "__main__":
