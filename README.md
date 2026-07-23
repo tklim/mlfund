@@ -366,3 +366,19 @@ The sync helper updates `origin/main`, creates a `codex/data-refresh-...`
 branch, regenerates and validates the snapshot, commits only the generated
 file, pushes the branch, and prints the pull-request URL. Merging the reviewed
 pull request into dashboard `main` triggers the production deployment.
+
+### Automated Daily Dashboard Publishing
+
+Install or update the daily Windows task after validating the publisher:
+
+```powershell
+python scripts/operate.py install-scheduler --dry-run
+python scripts/operate.py install-scheduler
+```
+
+The task runs `scripts/publish_daily_dashboard.ps1` every day at the configured
+time (18:30 by default). It refreshes NAV data, generates reports, creates a
+snapshot-only dashboard pull request when data changed, waits for validation,
+merges it, and verifies the Cloudflare production endpoint. Run summaries and
+transcripts are kept locally under `outputs/reports/automation/`; a failed run
+leaves the current production dashboard untouched.

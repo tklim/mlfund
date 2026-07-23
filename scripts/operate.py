@@ -796,12 +796,25 @@ def print_status(config):
 def install_scheduler(config, task_name=None, time_value=None, dry_run=False):
     task_name = task_name or config["schedule"]["task_name"]
     time_value = time_value or config["schedule"]["time"]
-    command = f'cmd /c cd /d "{REPO_ROOT}" && "{sys.executable}" "{REPO_ROOT / "scripts" / "operate.py"}" daily'
-    schtasks = ["schtasks", "/Create", "/TN", task_name, "/TR", command, "/SC", "DAILY", "/ST", time_value, "/F"]
-    print(command_text(schtasks))
+    installer = REPO_ROOT / "scripts" / "install_daily_publish_scheduler.ps1"
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(installer),
+        "-TaskName",
+        task_name,
+        "-Time",
+        time_value,
+    ]
+    if dry_run:
+        command.append("-DryRun")
+    print(command_text(command))
     if dry_run:
         return 0
-    completed = subprocess.run(schtasks)
+    completed = subprocess.run(command, cwd=REPO_ROOT)
     return completed.returncode
 
 
