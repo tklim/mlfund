@@ -31,6 +31,7 @@ class DashboardAutomationScriptTests(unittest.TestCase):
         self.assertIn("-MultipleInstances IgnoreNew", script)
         self.assertIn("-StartWhenAvailable", script)
         self.assertIn("-ExecutionTimeLimit (New-TimeSpan -Hours 72)", script)
+        self.assertIn("-LogonType Interactive", script)
 
 
 if __name__ == "__main__":
