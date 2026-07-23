@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$NoPush
+    [switch]$NoPush,
+    [string]$ResultPath
 )
 
 Set-StrictMode -Version Latest
@@ -79,6 +80,20 @@ function Get-ChangedPaths {
     )
 }
 
+function Write-SyncResult {
+    param([hashtable]$Result)
+
+    $json = $Result | ConvertTo-Json -Compress
+    if ($ResultPath) {
+        $parent = Split-Path -Parent $ResultPath
+        if ($parent) {
+            New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        }
+        Set-Content -LiteralPath $ResultPath -Value $json -Encoding utf8
+    }
+    Write-Output $json
+}
+
 if (-not (Test-Path -LiteralPath $dashboardPath -PathType Container)) {
     throw "Dashboard repository is missing. Run scripts/setup_dashboard_repo.ps1 first."
 }
@@ -143,7 +158,14 @@ if ((Get-MeaningfulSnapshot $beforeSnapshot) -eq (Get-MeaningfulSnapshot $afterS
     Get-GitOutput @("-C", $dashboardPath, "switch", "main") | Out-Null
     Get-GitOutput @("-C", $dashboardPath, "branch", "-D", $refreshBranch) | Out-Null
     Write-Host "Dashboard data is unchanged; no branch or commit was kept."
-    exit 0
+    Write-SyncResult @{
+        status = "unchanged"
+        branch = $null
+        snapshot_commit = $null
+        compare_url = $null
+        source_commit = (Get-GitOutput @("-C", $repoRoot, "rev-parse", "--short", "HEAD") | Select-Object -First 1).Trim()
+    }
+    return
 }
 
 $changedPaths = @(Get-ChangedPaths)
@@ -179,13 +201,29 @@ Get-GitOutput @(
     "-m", "Source mlfund: $sourceCommit ($sourceState)"
 ) | ForEach-Object { Write-Host $_ }
 
+$snapshotCommit = (Get-GitOutput @("-C", $dashboardPath, "rev-parse", "HEAD") | Select-Object -First 1).Trim()
+$encodedBranch = [System.Uri]::EscapeDataString($refreshBranch)
+$pullRequestUrl = "https://github.com/tklim/fund-signal-dashboard/compare/main...${encodedBranch}?expand=1"
+
 if ($NoPush) {
     Write-Host "Snapshot committed locally on $refreshBranch. Push was skipped."
-    exit 0
+    Write-SyncResult @{
+        status = "changed_not_pushed"
+        branch = $refreshBranch
+        snapshot_commit = $snapshotCommit
+        compare_url = $pullRequestUrl
+        source_commit = $sourceCommit
+    }
+    return
 }
 
 Get-GitOutput @("-C", $dashboardPath, "push", "--set-upstream", "origin", $refreshBranch) | ForEach-Object { Write-Host $_ }
-$encodedBranch = [System.Uri]::EscapeDataString($refreshBranch)
-$pullRequestUrl = "https://github.com/tklim/fund-signal-dashboard/compare/main...${encodedBranch}?expand=1"
 Write-Host "Snapshot branch pushed. Open the pull request:"
 Write-Host $pullRequestUrl
+Write-SyncResult @{
+    status = "changed"
+    branch = $refreshBranch
+    snapshot_commit = $snapshotCommit
+    compare_url = $pullRequestUrl
+    source_commit = $sourceCommit
+}
