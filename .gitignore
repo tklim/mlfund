@@ -20,3 +20,6 @@ data/*_nav_*Y.csv
 # Local editor/system files
 .DS_Store
 Thumbs.db
+
+# Independent Fund Signal web application repository
+/dashboard/

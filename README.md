@@ -336,3 +336,49 @@ schtasks /create /tn "MLFundDailyInvestmentReview" /tr "powershell -NoProfile -E
 ## License
 
 MIT License - Use freely for personal/investment tracking purposes.
+
+## Fund Signal web dashboard
+
+The internet dashboard is maintained as a separate Git repository nested at
+`dashboard/`:
+
+- Source: `https://github.com/tklim/fund-signal-dashboard.git`
+- Production: `https://fund-signal-dashboard.ltkiat.workers.dev`
+
+The outer `mlfund` repository owns the analysis pipeline and generates the
+dashboard snapshot. The nested repository owns the web application and its
+Cloudflare deployment. Git operations and commits must remain separate.
+
+Prepare a new clone or validate the existing nested repository:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/setup_dashboard_repo.ps1
+```
+
+After the local analysis outputs are ready, publish a snapshot through a
+reviewed dashboard pull request:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/sync_dashboard_snapshot.ps1
+```
+
+The sync helper updates `origin/main`, creates a `codex/data-refresh-...`
+branch, regenerates and validates the snapshot, commits only the generated
+file, pushes the branch, and prints the pull-request URL. Merging the reviewed
+pull request into dashboard `main` triggers the production deployment.
+
+### Automated Daily Dashboard Publishing
+
+Install or update the daily Windows task after validating the publisher:
+
+```powershell
+python scripts/operate.py install-scheduler --dry-run
+python scripts/operate.py install-scheduler
+```
+
+The task runs `scripts/publish_daily_dashboard.ps1` every day at the configured
+time (18:30 by default). It refreshes NAV data, generates reports, creates a
+snapshot-only dashboard pull request when data changed, waits for validation,
+merges it, and verifies the Cloudflare production endpoint. Run summaries and
+transcripts are kept locally under `outputs/reports/automation/`; a failed run
+leaves the current production dashboard untouched.

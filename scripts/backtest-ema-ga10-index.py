@@ -63,7 +63,18 @@ DEFAULT_SHORT_EMA_BOUNDS = (2, 60)
 DEFAULT_LONG_EMA_BOUNDS = (30, 300)
 DEFAULT_RSI_OVERSOLD_BOUNDS = (10, 40)
 DEFAULT_RSI_OVERBOUGHT_BOUNDS = (60, 90)
+DEFAULT_STOP_LOSS_BOUNDS = (8, 15)
+DEFAULT_COOLDOWN_BOUNDS = (0, 3)
+DEFAULT_DRAWDOWN_EXIT_BOUNDS = (2.5, 4.0)
+DEFAULT_REENTRY_REBOUND_BOUNDS = (1.0, 3.0)
 DEFAULT_RSI_PERIOD = 14
+SUPPORTED_GENE_BOUND_OVERRIDE_KEYS = {
+    "stop_loss",
+    "cooldown",
+    "drawdown_exit_pct",
+    "reentry_rebound_pct",
+    "exposure_multiplier",
+}
 LOCK_RETRY_SCHEDULE_SECONDS = [30, 60, 120]
 history_fallback_files = []
 skip_top5_refresh_for_run = False
@@ -275,6 +286,46 @@ def parse_args():
         help="RSI overbought integer bounds for GA search (default: 60 90)"
     )
     parser.add_argument(
+        "--stop-loss-bounds",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("MIN", "MAX"),
+        help="Override stop-loss bounds for this run"
+    )
+    parser.add_argument(
+        "--cooldown-bounds",
+        nargs=2,
+        type=int,
+        default=None,
+        metavar=("MIN", "MAX"),
+        help="Override cooldown integer bounds for this run"
+    )
+    parser.add_argument(
+        "--drawdown-exit-bounds",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("MIN", "MAX"),
+        help="Override drawdown-exit bounds for this run"
+    )
+    parser.add_argument(
+        "--reentry-rebound-bounds",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("MIN", "MAX"),
+        help="Override re-entry rebound bounds for this run"
+    )
+    parser.add_argument(
+        "--exposure-multiplier-bounds",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("MIN", "MAX"),
+        help="Override exposure-multiplier bounds for this run"
+    )
+    parser.add_argument(
         "--symbols",
         nargs="+",
         default=["^GSPC", "QQQ"],
@@ -376,29 +427,110 @@ def apply_profile_override_preset(profile_name, preset_name):
             profile_settings[key] = value
 
 
-def get_exposure_bounds(strategy_profile_name):
+def normalize_gene_bound_overrides(gene_bound_overrides):
+    """Validate and normalize explicit per-run gene-bound overrides."""
+    if gene_bound_overrides is None:
+        return {}
+    if not isinstance(gene_bound_overrides, dict):
+        raise ValueError("gene_bound_overrides must be a dictionary")
+
+    unknown_keys = sorted(
+        set(gene_bound_overrides) - SUPPORTED_GENE_BOUND_OVERRIDE_KEYS,
+        key=str,
+    )
+    if unknown_keys:
+        unknown_display = ", ".join(str(key) for key in unknown_keys)
+        raise ValueError(f"Unknown gene bound override key(s): {unknown_display}")
+
+    normalized = {}
+    for key, raw_bounds in gene_bound_overrides.items():
+        if not isinstance(raw_bounds, (list, tuple)) or len(raw_bounds) != 2:
+            raise ValueError(f"{key} bounds require exactly two values: MIN MAX")
+
+        try:
+            lower = float(raw_bounds[0])
+            upper = float(raw_bounds[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} bounds must be numeric") from exc
+
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            raise ValueError(f"{key} bounds must be finite")
+        if lower < 0 or upper < 0:
+            raise ValueError(f"{key} bounds must be non-negative")
+        if lower > upper:
+            raise ValueError(f"{key} minimum must be <= maximum")
+
+        if key == "cooldown":
+            if not lower.is_integer() or not upper.is_integer():
+                raise ValueError("cooldown bounds must be integers")
+            normalized[key] = (int(lower), int(upper))
+        else:
+            normalized[key] = (lower, upper)
+
+    return normalized
+
+
+def build_gene_bound_overrides_from_args(args):
+    """Build the Python override dictionary from optional CLI arguments."""
+    cli_values = {
+        "stop_loss": args.stop_loss_bounds,
+        "cooldown": args.cooldown_bounds,
+        "drawdown_exit_pct": args.drawdown_exit_bounds,
+        "reentry_rebound_pct": args.reentry_rebound_bounds,
+        "exposure_multiplier": args.exposure_multiplier_bounds,
+    }
+    return normalize_gene_bound_overrides({
+        key: value for key, value in cli_values.items() if value is not None
+    })
+
+
+def get_exposure_bounds(strategy_profile_name, gene_bound_overrides=None):
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
     default_exposure = profile_settings.get("default_exposure_multiplier", 1.0)
-    return profile_settings.get("gene_bounds", {}).get(
+    exposure_bounds = profile_settings.get("gene_bounds", {}).get(
         "exposure_multiplier",
         (default_exposure, default_exposure),
     )
+    overrides = normalize_gene_bound_overrides(gene_bound_overrides)
+    return overrides.get("exposure_multiplier", exposure_bounds)
 
 
 def resolve_profile_gene_bounds(strategy_profile_name, short_ema_bounds, long_ema_bounds,
                                 sl_bounds, cd_bounds, drawdown_exit_bounds,
-                                reentry_rebound_bounds):
-    """Apply profile-specific optimizer bounds without changing the public CLI."""
+                                reentry_rebound_bounds, gene_bound_overrides=None):
+    """Resolve defaults, profile bounds, then explicit per-run overrides."""
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
     profile_bounds = profile_settings.get("gene_bounds", {})
+    overrides = normalize_gene_bound_overrides(gene_bound_overrides)
     return (
         profile_bounds.get("short_ema", short_ema_bounds),
         profile_bounds.get("long_ema", long_ema_bounds),
-        profile_bounds.get("stop_loss", sl_bounds),
-        profile_bounds.get("cooldown", cd_bounds),
-        profile_bounds.get("drawdown_exit_pct", drawdown_exit_bounds),
-        profile_bounds.get("reentry_rebound_pct", reentry_rebound_bounds),
+        overrides.get("stop_loss", profile_bounds.get("stop_loss", sl_bounds)),
+        overrides.get("cooldown", profile_bounds.get("cooldown", cd_bounds)),
+        overrides.get(
+            "drawdown_exit_pct",
+            profile_bounds.get("drawdown_exit_pct", drawdown_exit_bounds),
+        ),
+        overrides.get(
+            "reentry_rebound_pct",
+            profile_bounds.get("reentry_rebound_pct", reentry_rebound_bounds),
+        ),
     )
+
+
+def build_gene_bound_metadata(gene_bound_overrides, effective_gene_bounds):
+    """Return reproducible run-history fields for injected and effective bounds."""
+    overrides = normalize_gene_bound_overrides(gene_bound_overrides)
+    metadata = {
+        "gene_bound_overrides": json.dumps(overrides, sort_keys=True),
+    }
+    for key in sorted(SUPPORTED_GENE_BOUND_OVERRIDE_KEYS):
+        bounds = effective_gene_bounds.get(key)
+        if bounds is None:
+            continue
+        metadata[f"{key}_bound_min"] = bounds[0]
+        metadata[f"{key}_bound_max"] = bounds[1]
+    return metadata
 
 def build_deterministic_seed(*parts):
     """Create a stable 32-bit seed from run metadata."""
@@ -682,8 +814,14 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
                        rsi_oversold_bounds_value=DEFAULT_RSI_OVERSOLD_BOUNDS,
                        rsi_overbought_bounds_value=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                        machine_metadata=None,
-                       total_return_method=NOT_APPLICABLE_TOTAL_RETURN_METHOD):
+                       total_return_method=NOT_APPLICABLE_TOTAL_RETURN_METHOD,
+                       gene_bound_overrides=None,
+                       effective_gene_bounds=None):
     machine_metadata = machine_metadata or get_machine_metadata()
+    gene_bound_metadata = build_gene_bound_metadata(
+        gene_bound_overrides,
+        effective_gene_bounds or {},
+    )
     return {
         "run_id": run_id,
         **machine_metadata,
@@ -717,6 +855,7 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
         "mutation_rates": ",".join(str(value) for value in mutation_rates_value) if mutation_rates_value else "default grid",
         "crossover_rates": ",".join(str(value) for value in crossover_rates_value) if crossover_rates_value else "default grid",
         "run_started_at": started_at,
+        **gene_bound_metadata,
     }
 
 
@@ -1686,13 +1825,14 @@ def calculate_missed_upside_after_exits(df_result, trades):
 
 ###########################################################
 def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_ema_bounds=DEFAULT_LONG_EMA_BOUNDS,
-                           sl_bounds=(8, 15), cd_bounds=(0, 3),
-                           drawdown_exit_bounds=(2.5, 4.0), reentry_rebound_bounds=(1.0, 3.0),
+                           sl_bounds=DEFAULT_STOP_LOSS_BOUNDS, cd_bounds=DEFAULT_COOLDOWN_BOUNDS,
+                           drawdown_exit_bounds=DEFAULT_DRAWDOWN_EXIT_BOUNDS,
+                           reentry_rebound_bounds=DEFAULT_REENTRY_REBOUND_BOUNDS,
                            rsi_oversold_bounds=DEFAULT_RSI_OVERSOLD_BOUNDS,
                            rsi_overbought_bounds=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                            pop_size=50, generations=50, mutation_rate=0.1, crossover_rate=0.7,
                            initial_capital=10000, strategy_profile_name="generic",
-                           ga_seed_value=None, **kwargs):
+                           ga_seed_value=None, gene_bound_overrides=None, **kwargs):
     """GA optimizer for index behavior using benchmark-relative fitness."""
     import pygad
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
@@ -1704,6 +1844,7 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
         cd_bounds,
         drawdown_exit_bounds,
         reentry_rebound_bounds,
+        gene_bound_overrides,
     )
 
     gene_space = [
@@ -1716,15 +1857,16 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
         {'low': rsi_oversold_bounds[0], 'high': rsi_oversold_bounds[1] + 1, 'step': 1},
         {'low': rsi_overbought_bounds[0], 'high': rsi_overbought_bounds[1] + 1, 'step': 1},
     ]
-    exposure_bounds = get_exposure_bounds(strategy_profile_name)
+    exposure_bounds = get_exposure_bounds(strategy_profile_name, gene_bound_overrides)
     uses_exposure_gene = exposure_bounds[1] > exposure_bounds[0]
+    fixed_exposure_multiplier = float(exposure_bounds[0])
     if uses_exposure_gene:
         gene_space.append({'low': exposure_bounds[0], 'high': exposure_bounds[1]})
     num_genes = len(gene_space)
 
     def fitness_func(ga_instance, solution, solution_idx):
         short_ema, long_ema, sl, cd, drawdown_exit_pct, reentry_rebound_pct, rsi_oversold, rsi_overbought = solution[:8]
-        exposure_multiplier = float(solution[8]) if uses_exposure_gene else profile_settings.get("default_exposure_multiplier", 1.0)
+        exposure_multiplier = float(solution[8]) if uses_exposure_gene else fixed_exposure_multiplier
         short_ema = int(short_ema)
         long_ema = int(long_ema)
         cd = int(cd)
@@ -1850,7 +1992,7 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
             'rsi_oversold': int(solution[6]),
             'rsi_overbought': int(solution[7]),
             'rsi_period': DEFAULT_RSI_PERIOD,
-            'exposure_multiplier': float(solution[8]) if uses_exposure_gene else profile_settings.get("default_exposure_multiplier", 1.0),
+            'exposure_multiplier': float(solution[8]) if uses_exposure_gene else fixed_exposure_multiplier,
             'effective_cooldown': int(solution[3]) + profile_settings['cooldown_extra_periods'],
             'effective_drawdown_exit_pct': solution[4] * profile_settings['drawdown_exit_multiplier'],
             'effective_reentry_rebound_pct': solution[5] * profile_settings['reentry_rebound_multiplier'],
@@ -1870,15 +2012,17 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
 
 # Hyperparameter Tuning Function
 def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_ema_bounds=DEFAULT_LONG_EMA_BOUNDS,
-                        sl_bounds=(8,15), cd_bounds=(0,3),
-                        drawdown_exit_bounds=(2.5,4.0), reentry_rebound_bounds=(1.0,3.0),
+                        sl_bounds=DEFAULT_STOP_LOSS_BOUNDS, cd_bounds=DEFAULT_COOLDOWN_BOUNDS,
+                        drawdown_exit_bounds=DEFAULT_DRAWDOWN_EXIT_BOUNDS,
+                        reentry_rebound_bounds=DEFAULT_REENTRY_REBOUND_BOUNDS,
                         rsi_oversold_bounds=DEFAULT_RSI_OVERSOLD_BOUNDS,
                         rsi_overbought_bounds=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                         initial_capital=10000, strategy_profile_name="generic",
                         ga_seed_value=None, mutation_rates_value=None,
                         crossover_rates_value=None, return_best_params=False,
                         run_metadata=None, window_metadata=None,
-                        strategy_parameter_metadata=None):
+                        strategy_parameter_metadata=None,
+                        gene_bound_overrides=None):
     """Grid search over GA hyperparameters for the index-specific objective."""
     log_print("\n=== GA HYPERPARAMETER TUNING PHASE ===")
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
@@ -1890,14 +2034,23 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
         cd_bounds,
         drawdown_exit_bounds,
         reentry_rebound_bounds,
+        gene_bound_overrides,
     )
+    exposure_bounds = get_exposure_bounds(strategy_profile_name, gene_bound_overrides)
+    effective_gene_bounds = {
+        "stop_loss": sl_bounds,
+        "cooldown": cd_bounds,
+        "drawdown_exit_pct": drawdown_exit_bounds,
+        "reentry_rebound_pct": reentry_rebound_bounds,
+        "exposure_multiplier": exposure_bounds,
+    }
     log_print(
-        "Profile gene bounds: "
+        "Effective gene bounds: "
         f"EMA short={short_ema_bounds}, EMA long={long_ema_bounds}, "
         f"SL={sl_bounds}, CD={cd_bounds}, DDX={drawdown_exit_bounds}, "
         f"RBR={reentry_rebound_bounds}, "
         f"RSI={rsi_oversold_bounds}/{rsi_overbought_bounds}, "
-        f"EXP={get_exposure_bounds(strategy_profile_name)}"
+        f"EXP={exposure_bounds}"
     )
     mut_ranges = mutation_rates_value if mutation_rates_value else [0.01, 0.05, 0.1, 0.15]
     cross_ranges = crossover_rates_value if crossover_rates_value else [0.6, 0.7, 0.8, 0.9]
@@ -1917,7 +2070,8 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
             pop_size=pop, generations=gens, mutation_rate=mut, crossover_rate=cross,
             initial_capital=initial_capital,
             strategy_profile_name=strategy_profile_name,
-            ga_seed_value=ga_seed_value
+            ga_seed_value=ga_seed_value,
+            gene_bound_overrides=gene_bound_overrides,
         )
 
         if best_params is None:
@@ -2014,6 +2168,7 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
     metadata.update(run_metadata or {})
     metadata.update(window_metadata or {})
     metadata.update(strategy_parameter_metadata or {})
+    metadata.update(build_gene_bound_metadata(gene_bound_overrides, effective_gene_bounds))
     if metadata:
         for key, value in metadata.items():
             results_df[key] = value
@@ -2062,7 +2217,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                          rsi_oversold_bounds_value=DEFAULT_RSI_OVERSOLD_BOUNDS,
                          rsi_overbought_bounds_value=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                          reuse_tuned_params_value=False, price_column_value="TotalReturn",
-                         ga_search_preset_value="grid", profile_override_preset_value="default"):
+                         ga_search_preset_value="grid", profile_override_preset_value="default",
+                         gene_bound_overrides=None):
     """Run the full walk-forward GA backtest for a single CSV data source."""
     global log_file, csv_name, lookback_years, offset_months, pop_ranges
     global gen_ranges, mutation_rates, crossover_rates, reuse_tuned_params
@@ -2084,15 +2240,35 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         normalize_ema_bounds(short_ema_bounds_value, "--short-ema-bounds"),
         normalize_ema_bounds(long_ema_bounds_value, "--long-ema-bounds"),
     )
-    short_ema_bounds_value, long_ema_bounds_value, _, _, _, _ = resolve_profile_gene_bounds(
+    gene_bound_overrides = normalize_gene_bound_overrides(gene_bound_overrides)
+    (
+        short_ema_bounds_value,
+        long_ema_bounds_value,
+        stop_loss_bounds_value,
+        cooldown_bounds_value,
+        drawdown_exit_bounds_value,
+        reentry_rebound_bounds_value,
+    ) = resolve_profile_gene_bounds(
         strategy_profile_value,
         short_ema_bounds_value,
         long_ema_bounds_value,
-        (8, 15),
-        (0, 3),
-        (2.5, 4.0),
-        (1.0, 3.0),
+        DEFAULT_STOP_LOSS_BOUNDS,
+        DEFAULT_COOLDOWN_BOUNDS,
+        DEFAULT_DRAWDOWN_EXIT_BOUNDS,
+        DEFAULT_REENTRY_REBOUND_BOUNDS,
+        gene_bound_overrides,
     )
+    exposure_multiplier_bounds_value = get_exposure_bounds(
+        strategy_profile_value,
+        gene_bound_overrides,
+    )
+    effective_gene_bounds = {
+        "stop_loss": stop_loss_bounds_value,
+        "cooldown": cooldown_bounds_value,
+        "drawdown_exit_pct": drawdown_exit_bounds_value,
+        "reentry_rebound_pct": reentry_rebound_bounds_value,
+        "exposure_multiplier": exposure_multiplier_bounds_value,
+    }
     short_ema_bounds_value, long_ema_bounds_value = validate_ema_bounds(
         short_ema_bounds_value,
         long_ema_bounds_value,
@@ -2122,6 +2298,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
     log_print(f"GA seed: {ga_seed if ga_seed is not None else 'deterministic'}")
     log_print(f"EMA bounds: short={short_ema_bounds_value}, long={long_ema_bounds_value}")
     log_print(f"RSI bounds: oversold={rsi_oversold_bounds_value}, overbought={rsi_overbought_bounds_value}")
+    log_print(f"Gene bound overrides: {gene_bound_overrides}")
+    log_print(f"Effective gene bounds: {effective_gene_bounds}")
     log_print(f"GA mutation rates: {mutation_rates if mutation_rates else 'default grid'}")
     log_print(f"GA crossover rates: {crossover_rates if crossover_rates else 'default grid'}")
     log_print(f"Reuse tuned params: {reuse_tuned_params}")
@@ -2197,6 +2375,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "long_ema_bounds": long_ema_bounds_value,
             "rsi_oversold_bounds": rsi_oversold_bounds_value,
             "rsi_overbought_bounds": rsi_overbought_bounds_value,
+            "gene_bound_overrides": gene_bound_overrides,
+            "effective_gene_bounds": effective_gene_bounds,
             "mutation_rates": mutation_rates or "default grid",
             "crossover_rates": crossover_rates or "default grid",
         }
@@ -2229,6 +2409,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             rsi_overbought_bounds_value,
             machine_metadata=machine_metadata,
             total_return_method=total_return_method,
+            gene_bound_overrides=gene_bound_overrides,
+            effective_gene_bounds=effective_gene_bounds,
         )
         strategy_parameter_metadata = build_strategy_parameter_metadata(
             {},
@@ -2290,6 +2472,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     run_metadata=run_metadata,
                     window_metadata=window_metadata,
                     strategy_parameter_metadata=strategy_parameter_metadata,
+                    gene_bound_overrides=gene_bound_overrides,
                 )
                 tuned_best_params = None
                 if reuse_tuned_params:
@@ -2340,7 +2523,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     crossover_rate=crossover_rate,
                     initial_capital=initial_capital,
                     strategy_profile_name=strategy_profile,
-                    ga_seed_value=ga_seed
+                    ga_seed_value=ga_seed,
+                    gene_bound_overrides=gene_bound_overrides,
                 )
             if best_params is None:
                 log_print(f"Skipping {current_date.strftime('%Y-%m-%d')}: No valid parameters")
@@ -2813,6 +2997,7 @@ if __name__ == "__main__":
         normalize_ema_bounds(args.rsi_oversold_bounds, "--rsi-oversold-bounds", minimum=0),
         normalize_ema_bounds(args.rsi_overbought_bounds, "--rsi-overbought-bounds", minimum=1),
     )
+    gene_bound_overrides = build_gene_bound_overrides_from_args(args)
     if args.ga_search_preset == "focused":
         mutation_rates = normalize_float_ranges(args.mutation_rates, [0.01])
         crossover_rates = normalize_float_ranges(args.crossover_rates, [0.6])
@@ -2831,6 +3016,7 @@ if __name__ == "__main__":
         f"pop_ranges={pop_ranges}, gen_ranges={gen_ranges}, symbols={args.symbols}, "
         f"short_ema_bounds={short_ema_bounds}, long_ema_bounds={long_ema_bounds}, "
         f"rsi_oversold_bounds={rsi_oversold_bounds}, rsi_overbought_bounds={rsi_overbought_bounds}, "
+        f"gene_bound_overrides={gene_bound_overrides}, "
         f"download_years={args.download_years}, ga_seed={args.ga_seed}, "
         f"data_file={args.data_file}, data_files={args.data_files}, fund_glob={args.fund_glob}, "
         f"price_column={args.price_column}, profile_override_preset={args.profile_override_preset}, "
@@ -2881,4 +3067,5 @@ if __name__ == "__main__":
             price_column_value=args.price_column,
             ga_search_preset_value=args.ga_search_preset,
             profile_override_preset_value=args.profile_override_preset,
+            gene_bound_overrides=gene_bound_overrides,
         )
