@@ -6,6 +6,7 @@ venv/
 # Generated analysis outputs
 # Keep the shared, append-only run history in Git. All other generated outputs
 # remain local-only.
+*.log
 outputs/*
 !outputs/tunings/
 outputs/tunings/*

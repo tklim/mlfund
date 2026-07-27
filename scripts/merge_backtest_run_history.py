@@ -2,9 +2,9 @@
 """Git merge driver for the append-only backtest run history CSV.
 
 Git calls this script as: merge_backtest_run_history.py <ancestor> <current> <other>
-It replaces <current> with the union of every CSV row from all three versions.
-Only exact duplicate rows are removed, so independently produced run records are
-never silently overwritten.
+It replaces <current> with the union of every CSV row from all three versions,
+sorted by run_id. Only exact duplicate rows are removed, so independently
+produced run records are never silently overwritten.
 """
 
 from __future__ import annotations
@@ -16,15 +16,34 @@ import tempfile
 from pathlib import Path
 
 
+class HistoryFormatError(ValueError):
+    """Raised when a history input cannot be safely merged."""
+
+
 def read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     if not path.exists() or path.stat().st_size == 0:
         return [], []
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            return [], []
-        headers = list(reader.fieldnames)
-        rows = [{key: value or "" for key, value in row.items() if key is not None} for row in reader]
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle, strict=True)
+            if not reader.fieldnames:
+                return [], []
+            headers = list(reader.fieldnames)
+            if len(headers) != len(set(headers)):
+                raise HistoryFormatError(f"{path}: duplicate CSV header names")
+            if "run_id" not in headers:
+                raise HistoryFormatError(f"{path}: missing required run_id column")
+
+            rows = []
+            for line_number, row in enumerate(reader, start=2):
+                if None in row:
+                    raise HistoryFormatError(f"{path}:{line_number}: too many CSV fields")
+                normalized = {key: value or "" for key, value in row.items() if key is not None}
+                if not normalized.get("run_id"):
+                    raise HistoryFormatError(f"{path}:{line_number}: missing run_id value")
+                rows.append(normalized)
+    except (csv.Error, UnicodeError) as error:
+        raise HistoryFormatError(f"{path}: invalid CSV ({error})") from error
     return headers, rows
 
 
@@ -47,9 +66,13 @@ def main(argv: list[str]) -> int:
         return 2
 
     ancestor_path, current_path, other_path = map(Path, argv[1:])
-    ancestor_headers, ancestor_rows = read_csv(ancestor_path)
-    current_headers, current_rows = read_csv(current_path)
-    other_headers, other_rows = read_csv(other_path)
+    try:
+        ancestor_headers, ancestor_rows = read_csv(ancestor_path)
+        current_headers, current_rows = read_csv(current_path)
+        other_headers, other_rows = read_csv(other_path)
+    except HistoryFormatError as error:
+        print(f"backtest-run-history merge failed: {error}", file=sys.stderr)
+        return 1
     headers = merged_headers(ancestor_headers, current_headers, other_headers)
 
     seen: set[tuple[str, ...]] = set()
@@ -59,6 +82,8 @@ def main(argv: list[str]) -> int:
         if key not in seen:
             seen.add(key)
             merged_rows.append(row)
+
+    merged_rows.sort(key=lambda row: row["run_id"])
 
     current_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(

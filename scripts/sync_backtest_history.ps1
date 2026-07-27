@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Message = 'Sync backtest run history'
+    [string]$Message = 'Sync backtest sources and run history'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,15 +12,39 @@ Set-Location $repoRoot
 
 & "$PSScriptRoot\setup_git_sync.ps1"
 $history = 'outputs/tunings/backtest_run_history.csv'
+$syncPaths = @(
+    '.gitignore'
+    'GITHUB_SYNC.md'
+    '*.sh'
+    'scripts/backtest-ema-ga10-index.py'
+    'scripts/merge_backtest_run_history.py'
+    'scripts/setup_git_sync.ps1'
+    'scripts/sync_backtest_history.ps1'
+    $history
+)
 
 # Refuse to pull over unrelated working-tree edits. This preserves work from
 # either machine; commit, stash, or resolve those edits separately first.
-$otherChanges = @(git status --porcelain | Where-Object { $_.Substring(3) -ne $history })
+$otherChanges = @(
+    git status --porcelain=v1 --untracked-files=all |
+        Where-Object {
+            $path = if ($_.Length -ge 4) { $_.Substring(3) } else { $_ }
+            ($path -notlike '*.sh') -and ($path -notin @(
+                '.gitignore',
+                'GITHUB_SYNC.md',
+                'scripts/backtest-ema-ga10-index.py',
+                'scripts/merge_backtest_run_history.py',
+                'scripts/setup_git_sync.ps1',
+                'scripts/sync_backtest_history.ps1',
+                $history
+            ))
+        }
+)
 if ($otherChanges.Count -gt 0) {
     Write-Error "Refusing to sync over unrelated working-tree changes. Preserve them first, then rerun.\n$($otherChanges -join "`n")"
 }
 
-git add -- $history
+git add -- $syncPaths
 git diff --cached --quiet
 if ($LASTEXITCODE -ne 0) {
     git commit -m $Message

@@ -24,10 +24,13 @@ After a backtest finishes, run:
 powershell -ExecutionPolicy Bypass -File scripts/sync_backtest_history.ps1
 ```
 
-The helper configures the merge driver, commits only the history, pulls with a
-merge (which unions concurrent rows), and pushes. It stops before pulling if
-any unrelated working-tree files are changed, preventing accidental overwrites.
+The helper configures the merge driver, commits the backtest source scripts and
+shared history, pulls with a merge (which unions concurrent rows), and pushes.
+It stops before pulling if any unrelated working-tree files are changed,
+including modified files under `data/`, preventing accidental overwrites.
+Generated logs are ignored and are never synchronized.
 
-For a manual workflow, first commit the history, then use `git pull --no-rebase`
-(not `--ff-only`) and `git push`. Do not use `git checkout --` or a hard reset
-to resolve a history conflict; rerun the setup script and retry the merge.
+For a manual workflow, commit the allowed source files and history, then use
+`git pull --no-rebase` (not `--ff-only`) and `git push`. Do not use `git checkout
+--` or a hard reset to resolve a history conflict; rerun the setup script and
+retry the merge.
