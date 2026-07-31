@@ -102,6 +102,23 @@ The RSI guard is defensive rather than a standalone signal:
 
 Adding RSI expands the GA search space. `--pop_ranges 10 --gen_ranges 10 --ga-search-preset focused` is still useful for quick tests, but serious tuning may need larger population or generation sizes to reduce noisy winners.
 
+### Per-Run Gene Bound Overrides
+
+Stop-loss, cooldown, drawdown-exit, re-entry, and exposure bounds can be injected for one run. Explicit values override the selected strategy profile without modifying it:
+
+```powershell
+python scripts/backtest-ema-ga10-index.py `
+  --data-file data/MAPF_Progress_nav_3Y.csv `
+  --stop-loss-bounds 8 101 `
+  --cooldown-bounds 0 3 `
+  --drawdown-exit-bounds 2.5 101 `
+  --reentry-rebound-bounds 0 3 `
+  --exposure-multiplier-bounds 1 1 `
+  --pop_ranges 10 --gen_ranges 10
+```
+
+Omit any flag to retain that gene's existing profile or default bounds. Equal exposure bounds fix exposure at that value and remove the exposure gene from the GA search.
+
 ### Use a Different Price Column
 
 By default the script uses `TotalReturn`. If you want to test raw NAV instead:
