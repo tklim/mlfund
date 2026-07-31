@@ -76,7 +76,15 @@ def parse_args():
         "--top-funds",
         type=int,
         default=0,
-        help="Number of top funds to chart after ranking by adaptive annualized return. Use 0 for all funds (default: 0, meaning all funds).",
+        help="Number of top funds to chart after ranking by excess annualized return. Use 0 for all funds (default: 0, meaning all funds).",
+    )
+    parser.add_argument(
+        "--leaderboard-only",
+        action="store_true",
+        help=(
+            "Generate the historical excess-annualized-return leaderboard from run history "
+            "without replaying the selected backtests."
+        ),
     )
     return parser.parse_args()
 
@@ -260,6 +268,10 @@ def select_best_run_rows(run_history_df, fund_label=None, top_funds=2):
         ascending=[False, False],
     )
     rank1 = sorted_runs.groupby("canonical_fund_label", sort=False, as_index=False).head(1).reset_index(drop=True)
+    # Exclude the fund only after finding its actual leader. Filtering zero rows
+    # before grouping could incorrectly promote a lower, negative run.
+    leader_values = pd.to_numeric(rank1["source_excess_annualized_return_pct"], errors="coerce")
+    rank1 = rank1[leader_values.notna() & leader_values.ne(0)].reset_index(drop=True)
     if not fund_label and top_funds and top_funds > 0:
         rank1 = rank1.head(top_funds).reset_index(drop=True)
     return rank1
@@ -912,6 +924,149 @@ def sorted_latest_results(results):
     return completed
 
 
+EXCESS_LEADERBOARD_COLUMNS = [
+    "rank",
+    "canonical_fund_label",
+    "source_excess_annualized_return_pct",
+    "source_adaptive_annualized_return_pct",
+    "source_buy_hold_annualized_return_pct",
+    "source_excess_return_pct",
+    "source_sharpe",
+    "source_max_dd_pct",
+    "lookback_years",
+    "offset_months",
+    "backtest_start",
+    "backtest_end",
+    "source_run_id",
+    "source_run_started_at",
+    "source_data_file",
+]
+
+
+def write_excess_annualized_dashboard(leaders, run_timestamp):
+    """Write a run-history leaderboard without replaying any backtests."""
+    leaderboard = leaders.copy().reset_index(drop=True)
+    leaderboard.insert(0, "rank", range(1, len(leaderboard) + 1))
+
+    csv_path = REPORTS_DIR / "excess_annualized_return_leaderboard.csv"
+    leaderboard.reindex(columns=EXCESS_LEADERBOARD_COLUMNS).to_csv(csv_path, index=False)
+
+    def pct(row, key):
+        value = row.get(key)
+        return "n/a" if value is None or pd.isna(value) else f"{float(value):+.2f}%"
+
+    def value_or_na(row, key, digits=0):
+        value = row.get(key)
+        return "n/a" if value is None or pd.isna(value) else f"{float(value):.{digits}f}"
+
+    max_abs_excess = max(
+        (abs(safe_float(row, "source_excess_annualized_return_pct")) for _, row in leaderboard.iterrows()),
+        default=1.0,
+    ) or 1.0
+    cards = []
+    for _, row in leaderboard.iterrows():
+        excess = safe_float(row, "source_excess_annualized_return_pct")
+        width = min(50.0, abs(excess) / max_abs_excess * 50.0)
+        tone = "positive" if excess > 0 else "negative"
+        bar_style = f"left:50%;width:{width:.3f}%" if excess > 0 else f"right:50%;width:{width:.3f}%"
+        canonical_label = html.escape(str(row.get("canonical_fund_label", "Unknown fund")))
+        source_label = html.escape(str(row.get("fund_label", canonical_label)))
+        source_note = (
+            f'<small class="source-label">History label: {source_label}</small>'
+            if source_label != canonical_label
+            else ""
+        )
+        started_at = row.get("source_run_started_at", "")
+        started_text = "n/a" if pd.isna(started_at) or not str(started_at).strip() else html.escape(str(started_at))
+        window_start = row.get("backtest_start", "")
+        window_end = row.get("backtest_end", "")
+        window_text = "n/a"
+        if pd.notna(window_start) and pd.notna(window_end) and str(window_start).strip() and str(window_end).strip():
+            window_text = f"{html.escape(str(window_start))} to {html.escape(str(window_end))}"
+        cards.append(
+            f"""
+            <article class="leader-row">
+              <div class="identity">
+                <span class="rank">{int(row['rank']):02d}</span>
+                <div><h2>{canonical_label}</h2>{source_note}<small>Best completed run started {started_text}</small></div>
+              </div>
+              <div class="primary">
+                <span>Excess annualized</span>
+                <strong class="{tone}">{pct(row, 'source_excess_annualized_return_pct')}</strong>
+                <div class="bar-track" aria-hidden="true"><i class="{tone}" style="{bar_style}"></i></div>
+              </div>
+              <dl>
+                <div><dt>Strategy ann.</dt><dd>{pct(row, 'source_adaptive_annualized_return_pct')}</dd></div>
+                <div><dt>Buy &amp; hold ann.</dt><dd>{pct(row, 'source_buy_hold_annualized_return_pct')}</dd></div>
+                <div><dt>Total excess</dt><dd>{pct(row, 'source_excess_return_pct')}</dd></div>
+                <div><dt>Sharpe</dt><dd>{value_or_na(row, 'source_sharpe', 2)}</dd></div>
+                <div><dt>Max drawdown</dt><dd>{pct(row, 'source_max_dd_pct')}</dd></div>
+                <div><dt>Lookback / offset</dt><dd>{value_or_na(row, 'lookback_years', 1)}Y / {value_or_na(row, 'offset_months')}M</dd></div>
+              </dl>
+              <div class="window"><span>Backtest window</span><b>{window_text}</b></div>
+            </article>
+            """
+        )
+
+    excess_values = pd.to_numeric(
+        leaderboard.get("source_excess_annualized_return_pct", pd.Series(dtype=float)),
+        errors="coerce",
+    )
+    positive_count = int((excess_values > 0).sum())
+    negative_count = int((excess_values < 0).sum())
+    top_value = pct(leaderboard.iloc[0], "source_excess_annualized_return_pct") if not leaderboard.empty else "n/a"
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    dashboard = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Excess Annualized Return Leaderboard</title>
+  <style>
+    :root{{--ink:#132238;--muted:#647186;--paper:#f4f7f8;--card:#fff;--line:#dce4e7;--green:#087a5b;--green-soft:#ddf4eb;--red:#b33a45;--red-soft:#fbe6e8;--navy:#173b57}}
+    *{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+    header{{padding:42px clamp(18px,5vw,72px) 34px;background:linear-gradient(125deg,#102e45,#1d5565);color:#fff}}header>div,main{{max-width:1380px;margin:auto}}
+    .eyebrow{{display:block;margin-bottom:9px;color:#a8e3d3;font-size:.72rem;font-weight:800;letter-spacing:.14em;text-transform:uppercase}}
+    h1{{max-width:820px;margin:0;font-size:clamp(2rem,4.5vw,4rem);line-height:1.02;letter-spacing:-.045em}}header p{{max-width:760px;margin:17px 0 0;color:#d6e4e8;line-height:1.6}}
+    .summary{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;margin-top:30px;overflow:hidden;border:1px solid rgba(255,255,255,.2);border-radius:14px;background:rgba(255,255,255,.2)}}
+    .summary div{{padding:14px 16px;background:rgba(9,34,49,.5)}}.summary span,.primary span,.window span{{display:block;color:var(--muted);font-size:.7rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase}}
+    .summary span{{color:#b8d0d6}}.summary strong{{display:block;margin-top:3px;font-size:1.35rem}}main{{padding:26px clamp(12px,3vw,40px) 60px}}
+    .method{{display:flex;justify-content:space-between;gap:20px;margin:0 0 15px;padding:0 4px;color:var(--muted);font-size:.84rem}}.leaderboard{{display:grid;gap:10px}}
+    .leader-row{{display:grid;grid-template-columns:minmax(250px,1.35fr) minmax(180px,.8fr) minmax(520px,2.3fr) minmax(190px,.8fr);align-items:center;gap:22px;padding:18px 20px;border:1px solid var(--line);border-radius:16px;background:var(--card);box-shadow:0 7px 24px rgba(27,57,75,.045)}}
+    .identity{{display:flex;align-items:center;gap:14px;min-width:0}}.rank{{display:grid;place-items:center;min-width:44px;height:44px;border-radius:12px;background:#eaf0f3;color:var(--navy);font-weight:900}}
+    h2{{margin:0;font-size:1rem;overflow-wrap:anywhere}}.identity small{{display:block;margin-top:4px;color:var(--muted);font-size:.72rem}}.source-label{{color:#8a5a22!important}}
+    .primary strong{{display:block;margin:3px 0 8px;font-size:1.55rem}}.positive{{color:var(--green)}}.negative{{color:var(--red)}}
+    .bar-track{{position:relative;height:5px;border-radius:99px;background:linear-gradient(90deg,var(--red-soft) 0 49.8%,#a9b4bf 49.8% 50.2%,var(--green-soft) 50.2% 100%)}}.bar-track i{{position:absolute;top:0;height:5px;border-radius:99px;background:currentColor}}
+    dl{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0}}dl div{{padding:9px 10px;border-radius:10px;background:#f6f8f9}}dt{{color:var(--muted);font-size:.67rem;text-transform:uppercase;letter-spacing:.05em}}dd{{margin:3px 0 0;font-size:.88rem;font-weight:800}}
+    .window b{{display:block;margin-top:4px;font-size:.78rem;line-height:1.35}}.empty{{padding:50px;border:1px dashed var(--line);border-radius:16px;background:#fff;text-align:center;color:var(--muted)}}
+    @media(max-width:1050px){{.leader-row{{grid-template-columns:1.3fr .8fr 2fr}}.window{{grid-column:1/-1;padding-left:58px}}}}
+    @media(max-width:760px){{header{{padding-top:30px}}.summary{{grid-template-columns:repeat(2,1fr)}}.method{{display:block}}.method span{{display:block;margin-top:5px}}.leader-row{{grid-template-columns:1fr;gap:15px}}.window{{grid-column:auto;padding-left:0}}dl{{grid-template-columns:repeat(2,1fr)}}}}
+    @media(max-width:420px){{dl{{grid-template-columns:1fr}}}}@media print{{body{{background:#fff}}header{{padding:18px 24px;background:#173b57!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}}main{{padding:14px 0}}.leader-row{{break-inside:avoid;box-shadow:none;border-radius:0}}}}
+  </style>
+</head>
+<body>
+  <header><div>
+    <span class="eyebrow">Backtest run history</span>
+    <h1>Excess annualized return leaderboard</h1>
+    <p>Each fund appears once, using its strongest completed historical run versus buy and hold. A zero-valued fund leader is omitted because it may indicate an invalid or incomplete result.</p>
+    <section class="summary" aria-label="Leaderboard summary">
+      <div><span>Ranked funds</span><strong>{len(leaderboard)}</strong></div>
+      <div><span>Positive leaders</span><strong>{positive_count}</strong></div>
+      <div><span>Negative leaders</span><strong>{negative_count}</strong></div>
+      <div><span>Top excess ann.</span><strong>{top_value}</strong></div>
+    </section>
+  </div></header>
+  <main>
+    <p class="method">Sorted by best excess annualized return, descending. Ties use the most recent run. <span>Generated {generated_at} &middot; run {html.escape(run_timestamp)}</span></p>
+    <section class="leaderboard" aria-label="Ranked funds">{''.join(cards) if cards else '<div class="empty">No non-zero completed fund leaders were available.</div>'}</section>
+  </main>
+</body>
+</html>"""
+    dashboard_path = REPORTS_DIR / "excess_annualized_return_dashboard.html"
+    dashboard_path.write_text(dashboard, encoding="utf-8")
+    return dashboard_path, csv_path
+
+
 def write_latest_dashboard(results, run_timestamp):
     completed = sorted_latest_results(results)
 
@@ -1090,12 +1245,22 @@ def main():
 
     run_history_df = normalize_run_history(pd.read_csv(summary_path, low_memory=False))
     selected_rows = select_best_run_rows(run_history_df, args.fund_label, args.top_funds)
+    all_leaders = select_best_run_rows(run_history_df, args.fund_label, top_funds=0)
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    excess_dashboard_path, excess_csv_path = write_excess_annualized_dashboard(
+        all_leaders,
+        run_timestamp,
+    )
+    print(f"Excess annualized return dashboard saved to: {excess_dashboard_path}")
+    print(f"Excess annualized return leaderboard saved to: {excess_csv_path}")
+    if args.leaderboard_only:
+        return 0
+
     if not args.fund_label and args.top_funds and args.top_funds > 0:
         print(
             f"Generating final charts for top {len(selected_rows)} fund(s) "
-            "ranked by historical adaptive annualized return."
+            "ranked by historical excess annualized return."
         )
-    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     results = []
     for _, row in selected_rows.iterrows():

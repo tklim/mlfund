@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import json
 import re
 import sys
 import tempfile
@@ -75,6 +76,146 @@ class OperationalPipelineTests(unittest.TestCase):
         backtester = load_backtester_module()
         label = backtester.infer_fund_output_label("data/MSGLR_RM_ShariahGlobalREITMYR_nav_5Y.csv")
         self.assertEqual(label, "MSGLR_RM_ShariahGlobalREITMYR")
+
+    def test_backtester_parses_gene_bound_overrides_from_cli(self):
+        backtester = load_backtester_module()
+        argv = [
+            "backtest-ema-ga10-index.py",
+            "--stop-loss-bounds", "8", "101",
+            "--cooldown-bounds", "0", "3",
+            "--drawdown-exit-bounds", "2.5", "101",
+            "--reentry-rebound-bounds", "0", "3",
+            "--exposure-multiplier-bounds", "1", "1",
+        ]
+
+        with mock.patch.object(sys, "argv", argv):
+            overrides = backtester.build_gene_bound_overrides_from_args(backtester.parse_args())
+
+        self.assertEqual(
+            overrides,
+            {
+                "stop_loss": (8.0, 101.0),
+                "cooldown": (0, 3),
+                "drawdown_exit_pct": (2.5, 101.0),
+                "reentry_rebound_pct": (0.0, 3.0),
+                "exposure_multiplier": (1.0, 1.0),
+            },
+        )
+
+    def test_backtester_rejects_invalid_gene_bound_overrides(self):
+        backtester = load_backtester_module()
+        invalid_cases = [
+            ({"unknown": (0, 1)}, "Unknown gene bound"),
+            ({"stop_loss": (1,)}, "exactly two"),
+            ({"stop_loss": (-1, 2)}, "non-negative"),
+            ({"stop_loss": (2, 1)}, "minimum must be <= maximum"),
+            ({"stop_loss": (1, float("inf"))}, "finite"),
+            ({"cooldown": (0.5, 3)}, "must be integers"),
+        ]
+
+        for overrides, message in invalid_cases:
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(ValueError, message):
+                    backtester.normalize_gene_bound_overrides(overrides)
+
+    def test_explicit_gene_bounds_override_profile_bounds(self):
+        backtester = load_backtester_module()
+        defaults = backtester.resolve_profile_gene_bounds(
+            "qqq",
+            backtester.DEFAULT_SHORT_EMA_BOUNDS,
+            backtester.DEFAULT_LONG_EMA_BOUNDS,
+            backtester.DEFAULT_STOP_LOSS_BOUNDS,
+            backtester.DEFAULT_COOLDOWN_BOUNDS,
+            backtester.DEFAULT_DRAWDOWN_EXIT_BOUNDS,
+            backtester.DEFAULT_REENTRY_REBOUND_BOUNDS,
+        )
+        self.assertEqual(defaults[2], backtester.DEFAULT_STOP_LOSS_BOUNDS)
+        self.assertEqual(defaults[3], (0, 5))
+        self.assertEqual(defaults[4], (2.5, 8.0))
+        self.assertEqual(defaults[5], (0.25, 5.0))
+
+        overrides = {
+            "stop_loss": (8, 101),
+            "cooldown": (0, 3),
+            "drawdown_exit_pct": (2.5, 101),
+            "reentry_rebound_pct": (0, 3),
+            "exposure_multiplier": (1, 1),
+        }
+        resolved = backtester.resolve_profile_gene_bounds(
+            "qqq",
+            backtester.DEFAULT_SHORT_EMA_BOUNDS,
+            backtester.DEFAULT_LONG_EMA_BOUNDS,
+            backtester.DEFAULT_STOP_LOSS_BOUNDS,
+            backtester.DEFAULT_COOLDOWN_BOUNDS,
+            backtester.DEFAULT_DRAWDOWN_EXIT_BOUNDS,
+            backtester.DEFAULT_REENTRY_REBOUND_BOUNDS,
+            overrides,
+        )
+        self.assertEqual(resolved[2:], ((8.0, 101.0), (0, 3), (2.5, 101.0), (0.0, 3.0)))
+        self.assertEqual(
+            backtester.get_exposure_bounds("qqq-return-plus", overrides),
+            (1.0, 1.0),
+        )
+
+    def test_fixed_exposure_override_omits_gene_and_uses_injected_value(self):
+        backtester = load_backtester_module()
+        captured = {}
+
+        class FakeGA:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def run(self):
+                return None
+
+            def best_solution(self):
+                return [10, 60, 8.5, 0, 2.5, 0.0, 20, 80], 1.0, 0
+
+        overrides = {
+            "stop_loss": (8, 101),
+            "cooldown": (0, 3),
+            "drawdown_exit_pct": (2.5, 101),
+            "reentry_rebound_pct": (0, 3),
+            "exposure_multiplier": (1, 1),
+        }
+        frame = pd.DataFrame(
+            {
+                "Date": pd.date_range("2024-01-01", periods=2, freq="D"),
+                "NAV": [100.0, 101.0],
+            }
+        )
+
+        with mock.patch("pygad.GA", FakeGA):
+            best = backtester.genetic_optimize_params(
+                frame,
+                pop_size=2,
+                generations=1,
+                ga_seed_value=123,
+                gene_bound_overrides=overrides,
+            )
+
+        self.assertEqual(captured["num_genes"], 8)
+        self.assertEqual(len(captured["gene_space"]), 8)
+        self.assertEqual(captured["gene_space"][2], {"low": 8.0, "high": 101.0})
+        self.assertEqual(captured["gene_space"][4], {"low": 2.5, "high": 101.0})
+        self.assertEqual(best["exposure_multiplier"], 1.0)
+
+    def test_gene_bound_metadata_records_overrides_and_effective_bounds(self):
+        backtester = load_backtester_module()
+        overrides = backtester.normalize_gene_bound_overrides({
+            "stop_loss": (8, 101),
+            "cooldown": (0, 3),
+            "drawdown_exit_pct": (2.5, 101),
+            "reentry_rebound_pct": (0, 3),
+            "exposure_multiplier": (1, 1),
+        })
+        metadata = backtester.build_gene_bound_metadata(overrides, overrides)
+
+        self.assertEqual(json.loads(metadata["gene_bound_overrides"])["stop_loss"], [8.0, 101.0])
+        self.assertEqual(metadata["stop_loss_bound_max"], 101.0)
+        self.assertEqual(metadata["drawdown_exit_pct_bound_max"], 101.0)
+        self.assertEqual(metadata["exposure_multiplier_bound_min"], 1.0)
+        self.assertEqual(metadata["exposure_multiplier_bound_max"], 1.0)
 
     def test_strategy_review_canonicalizes_history_labels_from_data_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -298,6 +439,68 @@ class OperationalPipelineTests(unittest.TestCase):
         self.assertIn("viewport.addEventListener('wheel'", dashboard)
         self.assertTrue(pdf_bytes.startswith(b"%PDF"))
         self.assertEqual(len(re.findall(rb"/Type\s*/Page\b", pdf_bytes)), 2)
+
+    def test_excess_leader_selection_ignores_a_zero_fund_leader(self):
+        history = pd.DataFrame(
+            [
+                {
+                    "fund_label": "ZERO",
+                    "canonical_fund_label": "ZERO",
+                    "source_excess_annualized_return_pct": 0.0,
+                    "run_started_at": "2026-07-03",
+                },
+                {
+                    "fund_label": "ZERO",
+                    "canonical_fund_label": "ZERO",
+                    "source_excess_annualized_return_pct": -2.0,
+                    "run_started_at": "2026-07-02",
+                },
+                {
+                    "fund_label": "POSITIVE",
+                    "canonical_fund_label": "POSITIVE",
+                    "source_excess_annualized_return_pct": 4.0,
+                    "run_started_at": "2026-07-01",
+                },
+            ]
+        )
+
+        leaders = final_backtest_from_summary.select_best_run_rows(history, top_funds=0)
+
+        self.assertEqual(leaders["canonical_fund_label"].tolist(), ["POSITIVE"])
+
+    def test_excess_dashboard_ranks_fund_leaders_and_writes_csv(self):
+        leaders = pd.DataFrame(
+            [
+                {
+                    "fund_label": "HIGH",
+                    "canonical_fund_label": "HIGH",
+                    "source_excess_annualized_return_pct": 8.0,
+                    "source_adaptive_annualized_return_pct": 12.0,
+                    "source_buy_hold_annualized_return_pct": 4.0,
+                    "source_run_started_at": "2026-07-02",
+                },
+                {
+                    "fund_label": "LOW",
+                    "canonical_fund_label": "LOW",
+                    "source_excess_annualized_return_pct": -1.0,
+                    "source_adaptive_annualized_return_pct": 2.0,
+                    "source_buy_hold_annualized_return_pct": 3.0,
+                    "source_run_started_at": "2026-07-01",
+                },
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(final_backtest_from_summary, "REPORTS_DIR", Path(tmpdir)):
+                dashboard_path, csv_path = final_backtest_from_summary.write_excess_annualized_dashboard(
+                    leaders,
+                    "test-run",
+                )
+            dashboard = dashboard_path.read_text(encoding="utf-8")
+            csv_rows = pd.read_csv(csv_path)
+
+        self.assertLess(dashboard.index("HIGH"), dashboard.index("LOW"))
+        self.assertIn("Excess annualized return leaderboard", dashboard)
+        self.assertEqual(csv_rows["canonical_fund_label"].tolist(), ["HIGH", "LOW"])
 
     def test_report_commands_include_final_backtest(self):
         commands = operate.build_report_commands(self.config)
