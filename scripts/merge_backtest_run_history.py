@@ -89,7 +89,9 @@ def main(argv: list[str]) -> int:
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", newline="", dir=current_path.parent, delete=False
     ) as handle:
-        writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+        writer = csv.DictWriter(
+            handle, fieldnames=headers, extrasaction="ignore", lineterminator="\n"
+        )
         writer.writeheader()
         writer.writerows({header: row.get(header, "") for header in headers} for row in merged_rows)
         temporary_path = Path(handle.name)
