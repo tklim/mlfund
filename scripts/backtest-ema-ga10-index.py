@@ -124,6 +124,66 @@ STRATEGY_PROFILE_SETTINGS = {
         "partial_reentry_rebound_multiplier": 1.0,
         "signal_reentry_buffer_scale": 0.0,
     },
+    "generic-ride": {
+        "execution_mode": "drawdown_reentry",
+        "drawdown_exit_multiplier": 1.0,
+        "cooldown_extra_periods": 0,
+        "reentry_rebound_multiplier": 1.0,
+        "gene_bounds": {},
+        "require_price_above_long_ema_for_reentry": False,
+        "require_positive_long_slope_for_reentry": False,
+        "require_price_below_long_ema_for_exit": False,
+        "require_negative_long_slope_for_exit": False,
+        "missed_upside_after_exit_weight": 1.0,
+        "default_exposure_multiplier": 1.0,
+        "enable_partial_derisk": False,
+        "partial_exit_target_exposure": 0.5,
+        "full_exit_drawdown_multiplier": 1.0,
+        "partial_reentry_rebound_multiplier": 1.0,
+        "signal_reentry_buffer_scale": 0.0,
+    },
+    "generic-ride-slow": {
+        "execution_mode": "drawdown_reentry",
+        "drawdown_exit_multiplier": 1.0,
+        "cooldown_extra_periods": 0,
+        "reentry_rebound_multiplier": 1.0,
+        "gene_bounds": {"long_ema": (150, 300)},
+        "require_price_above_long_ema_for_reentry": False,
+        "require_positive_long_slope_for_reentry": False,
+        "require_price_below_long_ema_for_exit": False,
+        "require_negative_long_slope_for_exit": False,
+        "missed_upside_after_exit_weight": 1.0,
+        "default_exposure_multiplier": 1.0,
+        "enable_partial_derisk": False,
+        "partial_exit_target_exposure": 0.5,
+        "full_exit_drawdown_multiplier": 1.0,
+        "partial_reentry_rebound_multiplier": 1.0,
+        "signal_reentry_buffer_scale": 0.0,
+    },
+    "generic-bh-reachable": {
+        "execution_mode": "drawdown_reentry",
+        "drawdown_exit_multiplier": 1.0,
+        "cooldown_extra_periods": 0,
+        "reentry_rebound_multiplier": 1.0,
+        "gene_bounds": {
+            "stop_loss": (8, 101),
+            "cooldown": (0, 3),
+            "drawdown_exit_pct": (2.5, 101),
+            "reentry_rebound_pct": (0.0, 3.0),
+            "exposure_multiplier": (1.0, 1.0),
+        },
+        "require_price_above_long_ema_for_reentry": False,
+        "require_positive_long_slope_for_reentry": False,
+        "require_price_below_long_ema_for_exit": False,
+        "require_negative_long_slope_for_exit": False,
+        "missed_upside_after_exit_weight": 0.0,
+        "default_exposure_multiplier": 1.0,
+        "enable_partial_derisk": False,
+        "partial_exit_target_exposure": 0.5,
+        "full_exit_drawdown_multiplier": 1.0,
+        "partial_reentry_rebound_multiplier": 1.0,
+        "signal_reentry_buffer_scale": 0.0,
+    },
     "qqq": {
         "execution_mode": "regime_signal",
         "drawdown_exit_multiplier": 1.0,
@@ -169,6 +229,29 @@ STRATEGY_PROFILE_SETTINGS = {
         "partial_reentry_rebound_multiplier": 0.5,
         "signal_reentry_buffer_scale": 0.10,
     },
+    "qqq-return-plus-nolev": {
+        "execution_mode": "drawdown_reentry",
+        "drawdown_exit_multiplier": 1.0,
+        "cooldown_extra_periods": 0,
+        "reentry_rebound_multiplier": 1.0,
+        "gene_bounds": {
+            "cooldown": (0, 5),
+            "drawdown_exit_pct": (2.5, 10.0),
+            "reentry_rebound_pct": (0.25, 5.0),
+            "exposure_multiplier": (1.0, 1.0),
+        },
+        "require_price_above_long_ema_for_reentry": True,
+        "require_positive_long_slope_for_reentry": True,
+        "require_price_below_long_ema_for_exit": True,
+        "require_negative_long_slope_for_exit": True,
+        "missed_upside_after_exit_weight": 1.0,
+        "default_exposure_multiplier": 1.0,
+        "enable_partial_derisk": False,
+        "partial_exit_target_exposure": 0.5,
+        "full_exit_drawdown_multiplier": 1.75,
+        "partial_reentry_rebound_multiplier": 0.5,
+        "signal_reentry_buffer_scale": 0.10,
+    },
     "qqq-buyhold-plus": {
         "execution_mode": "drawdown_reentry",
         "drawdown_exit_multiplier": 1.0,
@@ -179,6 +262,33 @@ STRATEGY_PROFILE_SETTINGS = {
             "drawdown_exit_pct": (10.0, 10.0),
             "reentry_rebound_pct": (0.0, 0.0),
             "exposure_multiplier": (1.0, 1.35),
+        },
+        "require_price_above_long_ema_for_reentry": False,
+        "require_positive_long_slope_for_reentry": False,
+        "require_price_below_long_ema_for_exit": False,
+        "require_negative_long_slope_for_exit": False,
+        "missed_upside_after_exit_weight": 0.0,
+        "default_exposure_multiplier": 1.0,
+        "always_invested": True,
+        "disable_timing_exits": True,
+        "disable_stop_loss": True,
+        "disable_take_profit": True,
+        "enable_partial_derisk": False,
+        "partial_exit_target_exposure": 0.5,
+        "full_exit_drawdown_multiplier": 1.0,
+        "partial_reentry_rebound_multiplier": 1.0,
+        "signal_reentry_buffer_scale": 0.0,
+    },
+    "buyhold-1x": {
+        "execution_mode": "drawdown_reentry",
+        "drawdown_exit_multiplier": 1.0,
+        "cooldown_extra_periods": 0,
+        "reentry_rebound_multiplier": 1.0,
+        "gene_bounds": {
+            "cooldown": (0, 0),
+            "drawdown_exit_pct": (10.0, 10.0),
+            "reentry_rebound_pct": (0.0, 0.0),
+            "exposure_multiplier": (1.0, 1.0),
         },
         "require_price_above_long_ema_for_reentry": False,
         "require_positive_long_slope_for_reentry": False,
@@ -240,6 +350,12 @@ def parse_args():
         help="Offset period in months (default: 6)"
     )
     parser.add_argument(
+        "--initial-capital",
+        type=float,
+        default=10000,
+        help="Starting portfolio value (default: 10000)",
+    )
+    parser.add_argument(
         "--pop_ranges",
         nargs="+",
         type=str,
@@ -292,6 +408,13 @@ def parse_args():
         default=None,
         metavar=("MIN", "MAX"),
         help="Override stop-loss bounds for this run"
+    )
+    parser.add_argument(
+        "--take-profit-pct",
+        type=float,
+        default=None,
+        metavar="PCT",
+        help="Enable a GA-tuned take-profit gene from 0 through PCT gain",
     )
     parser.add_argument(
         "--cooldown-bounds",
@@ -355,15 +478,21 @@ def parse_args():
         help="Use an existing CSV file instead of downloading by symbol"
     )
     parser.add_argument(
+        "--fund-group",
+        default=None,
+        help="Optional base fund grouping for output histories",
+    )
+    parser.add_argument(
         "--data-files",
         nargs="+",
         default=None,
         help="Use one or more existing CSV files instead of downloading by symbol"
     )
     parser.add_argument(
-        "--fund-glob",
+        "--data-glob", "--fund-glob",
+        dest="data_glob",
         default="*_nav_*Y.csv",
-        help="Local Manulife CSV glob to backtest when no data file is supplied"
+        help="Local CSV glob (in data/) to backtest when no data file is supplied",
     )
     parser.add_argument(
         "--price-column",
@@ -400,6 +529,22 @@ def parse_args():
         "--reuse-tuned-params",
         action="store_true",
         help="Reuse the best parameter set found during tuning instead of rerunning the same GA"
+    )
+    parser.add_argument(
+        "--rebuild-source-run-id",
+        default="",
+        help="Optional legacy run ID that this run rebuilds on current data",
+    )
+    parser.add_argument(
+        "--rebuild-batch-id",
+        default="",
+        help="Optional selective-rebuild batch identifier",
+    )
+    parser.add_argument(
+        "--rebuild-mode",
+        choices=["", "latest_data"],
+        default="",
+        help="Optional rebuild lineage mode",
     )
     return parser.parse_args()
 
@@ -579,6 +724,7 @@ def build_param_set_id(row):
         "short_ema",
         "long_ema",
         "stop_loss",
+        "take_profit_pct",
         "cooldown",
         "drawdown_exit_pct",
         "reentry_rebound_pct",
@@ -816,7 +962,12 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
                        machine_metadata=None,
                        total_return_method=NOT_APPLICABLE_TOTAL_RETURN_METHOD,
                        gene_bound_overrides=None,
-                       effective_gene_bounds=None):
+                       effective_gene_bounds=None,
+                       fund_slice_label=None,
+                       take_profit_max_value=None,
+                       rebuild_source_run_id="",
+                       rebuild_batch_id="",
+                       rebuild_mode=""):
     machine_metadata = machine_metadata or get_machine_metadata()
     gene_bound_metadata = build_gene_bound_metadata(
         gene_bound_overrides,
@@ -826,6 +977,7 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
         "run_id": run_id,
         **machine_metadata,
         "fund_label": fund_label,
+        "fund_slice_label": fund_slice_label or fund_label,
         "data_file": str(csv_path),
         "price_column": price_column,
         "total_return_method": total_return_method,
@@ -854,7 +1006,11 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
         "rsi_overbought_max": rsi_overbought_bounds_value[1],
         "mutation_rates": ",".join(str(value) for value in mutation_rates_value) if mutation_rates_value else "default grid",
         "crossover_rates": ",".join(str(value) for value in crossover_rates_value) if crossover_rates_value else "default grid",
+        "take_profit_max": take_profit_max_value if take_profit_max_value is not None else "",
         "run_started_at": started_at,
+        "rebuild_source_run_id": rebuild_source_run_id,
+        "rebuild_batch_id": rebuild_batch_id,
+        "rebuild_mode": rebuild_mode,
         **gene_bound_metadata,
     }
 
@@ -1011,6 +1167,11 @@ def infer_fund_output_label(csv_file):
         return f"{fund_code}_{sanitize_label(short_name)}"
 
     return fund_label_from_data_file(csv_file)
+
+
+def fund_group_from_label(label):
+    """Group history-slice labels such as AAPL-3Y under their base fund."""
+    return re.sub(r"-\d+(?:\.\d+)?Y$", "", str(label), flags=re.IGNORECASE)
 
 
 def ensure_output_dirs():
@@ -1832,7 +1993,8 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
                            rsi_overbought_bounds=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                            pop_size=50, generations=50, mutation_rate=0.1, crossover_rate=0.7,
                            initial_capital=10000, strategy_profile_name="generic",
-                           ga_seed_value=None, gene_bound_overrides=None, **kwargs):
+                           ga_seed_value=None, gene_bound_overrides=None,
+                           take_profit_pct_value=None, **kwargs):
     """GA optimizer for index behavior using benchmark-relative fitness."""
     import pygad
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
@@ -1857,6 +2019,9 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
         {'low': rsi_oversold_bounds[0], 'high': rsi_oversold_bounds[1] + 1, 'step': 1},
         {'low': rsi_overbought_bounds[0], 'high': rsi_overbought_bounds[1] + 1, 'step': 1},
     ]
+    uses_take_profit_gene = take_profit_pct_value is not None
+    if uses_take_profit_gene:
+        gene_space.append({'low': 0.0, 'high': take_profit_pct_value})
     exposure_bounds = get_exposure_bounds(strategy_profile_name, gene_bound_overrides)
     uses_exposure_gene = exposure_bounds[1] > exposure_bounds[0]
     fixed_exposure_multiplier = float(exposure_bounds[0])
@@ -1866,7 +2031,17 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
 
     def fitness_func(ga_instance, solution, solution_idx):
         short_ema, long_ema, sl, cd, drawdown_exit_pct, reentry_rebound_pct, rsi_oversold, rsi_overbought = solution[:8]
-        exposure_multiplier = float(solution[8]) if uses_exposure_gene else fixed_exposure_multiplier
+        take_profit_pct = (
+            float(solution[8])
+            if uses_take_profit_gene
+            else DEFAULT_STRATEGY_PARAMETERS["take_profit_pct"]
+        )
+        exposure_index = 8 + int(uses_take_profit_gene)
+        exposure_multiplier = (
+            float(solution[exposure_index])
+            if uses_exposure_gene
+            else fixed_exposure_multiplier
+        )
         short_ema = int(short_ema)
         long_ema = int(long_ema)
         cd = int(cd)
@@ -1887,7 +2062,8 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
                 df_train, short_ema, long_ema, initial_capital,
                 use_rsi_filter=True, rsi_oversold=rsi_oversold,
                 rsi_overbought=rsi_overbought, rsi_period=DEFAULT_RSI_PERIOD,
-                use_stop_loss=True, stop_loss_pct=sl, use_take_profit=False,
+                use_stop_loss=True, stop_loss_pct=sl,
+                use_take_profit=uses_take_profit_gene, take_profit_pct=take_profit_pct,
                 cooldown_period=cd, drawdown_exit_pct=drawdown_exit_pct,
                 reentry_rebound_pct=reentry_rebound_pct, start_invested=True, debug=False,
                 strategy_profile_name=strategy_profile_name,
@@ -1897,7 +2073,8 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
                 df_test, short_ema, long_ema, initial_capital,
                 use_rsi_filter=True, rsi_oversold=rsi_oversold,
                 rsi_overbought=rsi_overbought, rsi_period=DEFAULT_RSI_PERIOD,
-                use_stop_loss=True, stop_loss_pct=sl, use_take_profit=False,
+                use_stop_loss=True, stop_loss_pct=sl,
+                use_take_profit=uses_take_profit_gene, take_profit_pct=take_profit_pct,
                 cooldown_period=cd, drawdown_exit_pct=drawdown_exit_pct,
                 reentry_rebound_pct=reentry_rebound_pct, start_invested=True, debug=False,
                 strategy_profile_name=strategy_profile_name,
@@ -1912,7 +2089,8 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
             df, short_ema, long_ema, initial_capital,
             use_rsi_filter=True, rsi_oversold=rsi_oversold,
             rsi_overbought=rsi_overbought, rsi_period=DEFAULT_RSI_PERIOD,
-            use_stop_loss=True, stop_loss_pct=sl, use_take_profit=False,
+            use_stop_loss=True, stop_loss_pct=sl,
+            use_take_profit=uses_take_profit_gene, take_profit_pct=take_profit_pct,
             cooldown_period=cd, drawdown_exit_pct=drawdown_exit_pct,
             reentry_rebound_pct=reentry_rebound_pct, start_invested=True, debug=False,
             strategy_profile_name=strategy_profile_name,
@@ -1985,6 +2163,8 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
             'short_ema': int(solution[0]),
             'long_ema': int(solution[1]),
             'stop_loss': solution[2],
+            'use_take_profit': uses_take_profit_gene,
+            'take_profit_pct': float(solution[8]) if uses_take_profit_gene else DEFAULT_STRATEGY_PARAMETERS["take_profit_pct"],
             'cooldown': int(solution[3]),
             'drawdown_exit_pct': solution[4],
             'reentry_rebound_pct': solution[5],
@@ -1992,14 +2172,14 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
             'rsi_oversold': int(solution[6]),
             'rsi_overbought': int(solution[7]),
             'rsi_period': DEFAULT_RSI_PERIOD,
-            'exposure_multiplier': float(solution[8]) if uses_exposure_gene else fixed_exposure_multiplier,
+            'exposure_multiplier': float(solution[8 + int(uses_take_profit_gene)]) if uses_exposure_gene else fixed_exposure_multiplier,
             'effective_cooldown': int(solution[3]) + profile_settings['cooldown_extra_periods'],
             'effective_drawdown_exit_pct': solution[4] * profile_settings['drawdown_exit_multiplier'],
             'effective_reentry_rebound_pct': solution[5] * profile_settings['reentry_rebound_multiplier'],
         }
         log_print(
             f"Best : EMA({best_params['short_ema']}, {best_params['long_ema']}), "
-            f"SL={best_params['stop_loss']:.2f}, CD={best_params['cooldown']}, "
+            f"SL={best_params['stop_loss']:.2f}, TP={best_params['take_profit_pct']:.2f}, CD={best_params['cooldown']}, "
             f"DDX={best_params['drawdown_exit_pct']:.2f}, RBR={best_params['reentry_rebound_pct']:.2f}, "
             f"RSI={best_params['rsi_oversold']}/{best_params['rsi_overbought']}, "
             f"EXP={best_params['exposure_multiplier']:.2f}x"
@@ -2022,7 +2202,8 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
                         crossover_rates_value=None, return_best_params=False,
                         run_metadata=None, window_metadata=None,
                         strategy_parameter_metadata=None,
-                        gene_bound_overrides=None):
+                        gene_bound_overrides=None,
+                        take_profit_pct_value=None):
     """Grid search over GA hyperparameters for the index-specific objective."""
     log_print("\n=== GA HYPERPARAMETER TUNING PHASE ===")
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
@@ -2047,7 +2228,8 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
     log_print(
         "Effective gene bounds: "
         f"EMA short={short_ema_bounds}, EMA long={long_ema_bounds}, "
-        f"SL={sl_bounds}, CD={cd_bounds}, DDX={drawdown_exit_bounds}, "
+        f"SL={sl_bounds}, TP={(0, take_profit_pct_value) if take_profit_pct_value is not None else 'disabled'}, "
+        f"CD={cd_bounds}, DDX={drawdown_exit_bounds}, "
         f"RBR={reentry_rebound_bounds}, "
         f"RSI={rsi_oversold_bounds}/{rsi_overbought_bounds}, "
         f"EXP={exposure_bounds}"
@@ -2072,6 +2254,7 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
             strategy_profile_name=strategy_profile_name,
             ga_seed_value=ga_seed_value,
             gene_bound_overrides=gene_bound_overrides,
+            take_profit_pct_value=take_profit_pct_value,
         )
 
         if best_params is None:
@@ -2084,7 +2267,9 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
             rsi_oversold=best_params['rsi_oversold'],
             rsi_overbought=best_params['rsi_overbought'],
             rsi_period=best_params.get('rsi_period', DEFAULT_RSI_PERIOD),
-            use_stop_loss=True, stop_loss_pct=best_params['stop_loss'], use_take_profit=False,
+            use_stop_loss=True, stop_loss_pct=best_params['stop_loss'],
+            use_take_profit=best_params['use_take_profit'],
+            take_profit_pct=best_params['take_profit_pct'],
             cooldown_period=best_params['cooldown'],
             drawdown_exit_pct=best_params['drawdown_exit_pct'],
             reentry_rebound_pct=best_params['reentry_rebound_pct'],
@@ -2111,6 +2296,7 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
             'best_short_ema': best_params['short_ema'],
             'best_long_ema': best_params['long_ema'],
             'best_stop_loss_pct': best_params['stop_loss'],
+            'best_take_profit_pct': best_params['take_profit_pct'],
             'best_cooldown': best_params['cooldown'],
             'best_drawdown_exit_pct': best_params['drawdown_exit_pct'],
             'best_reentry_rebound_pct': best_params['reentry_rebound_pct'],
@@ -2144,6 +2330,7 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
         results_df = pd.DataFrame([{
             'pop_size': 10, 'generations': 10, 'mutation_rate': 0.05, 'crossover_rate': 0.7,
             'best_short_ema': 0, 'best_long_ema': 0, 'best_stop_loss_pct': 0,
+            'best_take_profit_pct': 0,
             'best_cooldown': 0, 'best_drawdown_exit_pct': 0, 'best_reentry_rebound_pct': 0,
             'best_rsi_oversold': DEFAULT_STRATEGY_PARAMETERS["rsi_oversold"],
             'best_rsi_overbought': DEFAULT_STRATEGY_PARAMETERS["rsi_overbought"],
@@ -2178,6 +2365,7 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
     results_df["short_ema"] = results_df["best_short_ema"]
     results_df["long_ema"] = results_df["best_long_ema"]
     results_df["stop_loss"] = results_df["best_stop_loss_pct"]
+    results_df["take_profit_pct"] = results_df["best_take_profit_pct"]
     results_df["cooldown"] = results_df["best_cooldown"]
     results_df["stop_loss_pct"] = results_df["best_stop_loss_pct"]
     results_df["cooldown_period"] = results_df["best_cooldown"]
@@ -2218,7 +2406,10 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                          rsi_overbought_bounds_value=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                          reuse_tuned_params_value=False, price_column_value="TotalReturn",
                          ga_search_preset_value="grid", profile_override_preset_value="default",
-                         gene_bound_overrides=None):
+                         fund_group_value=None, gene_bound_overrides=None,
+                         take_profit_pct_value=None,
+                         rebuild_source_run_id_value="", rebuild_batch_id_value="",
+                         rebuild_mode_value=""):
     """Run the full walk-forward GA backtest for a single CSV data source."""
     global log_file, csv_name, lookback_years, offset_months, pop_ranges
     global gen_ranges, mutation_rates, crossover_rates, reuse_tuned_params
@@ -2230,6 +2421,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
     skip_top5_refresh_for_run = False
     csv_path = resolve_input_csv_path(csv_file)
     csv_name = infer_fund_output_label(csv_path)
+    fund_group = fund_group_value or fund_group_from_label(csv_name)
     lookback_years = lookback_years_value
     offset_months = offset_months_value
     pop_ranges = pop_ranges_value
@@ -2298,6 +2490,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
     log_print(f"GA seed: {ga_seed if ga_seed is not None else 'deterministic'}")
     log_print(f"EMA bounds: short={short_ema_bounds_value}, long={long_ema_bounds_value}")
     log_print(f"RSI bounds: oversold={rsi_oversold_bounds_value}, overbought={rsi_overbought_bounds_value}")
+    log_print(f"Take-profit: {take_profit_pct_value if take_profit_pct_value is not None else 'disabled'}")
     log_print(f"Gene bound overrides: {gene_bound_overrides}")
     log_print(f"Effective gene bounds: {effective_gene_bounds}")
     log_print(f"GA mutation rates: {mutation_rates if mutation_rates else 'default grid'}")
@@ -2365,6 +2558,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "total_return_method": total_return_method,
             "lookback_years": lookback_years,
             "offset_months": offset_months,
+            "initial_capital": initial_capital,
             "strategy_profile": strategy_profile,
             "profile_override_preset": profile_override_preset_value,
             "ga_seed": ga_seed if ga_seed is not None else "deterministic",
@@ -2379,12 +2573,16 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "effective_gene_bounds": effective_gene_bounds,
             "mutation_rates": mutation_rates or "default grid",
             "crossover_rates": crossover_rates or "default grid",
+            "take_profit_max": take_profit_pct_value,
+            "rebuild_source_run_id": rebuild_source_run_id_value,
+            "rebuild_batch_id": rebuild_batch_id_value,
+            "rebuild_mode": rebuild_mode_value,
         }
         run_id = build_run_id(started_at, csv_name, run_config_for_hash)
         run_metadata = build_run_metadata(
             run_id,
             csv_path,
-            csv_name,
+            fund_group,
             price_col,
             df_clean.index.min(),
             df_clean.index.max(),
@@ -2411,9 +2609,17 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             total_return_method=total_return_method,
             gene_bound_overrides=gene_bound_overrides,
             effective_gene_bounds=effective_gene_bounds,
+            fund_slice_label=csv_name,
+            take_profit_max_value=take_profit_pct_value,
+            rebuild_source_run_id=rebuild_source_run_id_value,
+            rebuild_batch_id=rebuild_batch_id_value,
+            rebuild_mode=rebuild_mode_value,
         )
         strategy_parameter_metadata = build_strategy_parameter_metadata(
-            {},
+            {
+                "use_take_profit": take_profit_pct_value is not None,
+                "take_profit_pct": DEFAULT_STRATEGY_PARAMETERS["take_profit_pct"],
+            },
             get_strategy_profile_settings(strategy_profile),
         )
         log_print(f"Run ID: {run_id}")
@@ -2464,6 +2670,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     long_ema_bounds=long_ema_bounds_value,
                     rsi_oversold_bounds=rsi_oversold_bounds_value,
                     rsi_overbought_bounds=rsi_overbought_bounds_value,
+                    initial_capital=initial_capital,
                     strategy_profile_name=strategy_profile,
                     ga_seed_value=ga_seed,
                     mutation_rates_value=mutation_rates,
@@ -2473,6 +2680,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     window_metadata=window_metadata,
                     strategy_parameter_metadata=strategy_parameter_metadata,
                     gene_bound_overrides=gene_bound_overrides,
+                    take_profit_pct_value=take_profit_pct_value,
                 )
                 tuned_best_params = None
                 if reuse_tuned_params:
@@ -2525,6 +2733,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     strategy_profile_name=strategy_profile,
                     ga_seed_value=ga_seed,
                     gene_bound_overrides=gene_bound_overrides,
+                    take_profit_pct_value=take_profit_pct_value,
                 )
             if best_params is None:
                 log_print(f"Skipping {current_date.strftime('%Y-%m-%d')}: No valid parameters")
@@ -2534,7 +2743,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             log_print(
                 f"Optimized for {current_date.strftime('%Y-%m-%d')}: "
                 f"EMA({best_params['short_ema']}, {best_params['long_ema']}), "
-                f"SL={best_params['stop_loss']:.2f}, CD={best_params['cooldown']}, "
+                f"SL={best_params['stop_loss']:.2f}, TP={best_params['take_profit_pct']:.2f}, CD={best_params['cooldown']}, "
                 f"DDX={best_params['drawdown_exit_pct']:.2f}, "
                 f"RBR={best_params['reentry_rebound_pct']:.2f}, "
                 f"RSI={best_params['rsi_oversold']}/{best_params['rsi_overbought']}, "
@@ -2572,7 +2781,8 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 'use_trend_filter': False,
                 'use_stop_loss': True,
                 'stop_loss_pct': best_params['stop_loss'],
-                'use_take_profit': False,
+                'use_take_profit': best_params['use_take_profit'],
+                'take_profit_pct': best_params['take_profit_pct'],
                 'cooldown_period': best_params['cooldown'],
                 'drawdown_exit_pct': best_params['drawdown_exit_pct'],
                 'reentry_rebound_pct': best_params['reentry_rebound_pct'],
@@ -2610,6 +2820,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     "short_ema": best_params['short_ema'],
                     "long_ema": best_params['long_ema'],
                     "stop_loss": best_params['stop_loss'],
+                    "take_profit_pct": best_params['take_profit_pct'],
                     "cooldown": best_params['cooldown'],
                     "drawdown_exit_pct": best_params['drawdown_exit_pct'],
                     "reentry_rebound_pct": best_params['reentry_rebound_pct'],
@@ -2624,6 +2835,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 "short_ema": best_params['short_ema'],
                 "long_ema": best_params['long_ema'],
                 "stop_loss": best_params['stop_loss'],
+                "take_profit_pct": best_params['take_profit_pct'],
                 "cooldown": best_params['cooldown'],
                 "drawdown_exit_pct": best_params['drawdown_exit_pct'],
                 "reentry_rebound_pct": best_params['reentry_rebound_pct'],
@@ -2654,7 +2866,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 "recorded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
             append_csv_row(WINDOW_HISTORY_FILE, window_row)
-            append_fund_history_row(csv_name, "window", window_row)
+            append_fund_history_row(fund_group, "window", window_row)
             portfolio_history.append(
                 df_result[['Date', 'Portfolio_Value', 'Position', 'Exposure']].copy()
                 if 'Date' in df_result.columns
@@ -2953,7 +3165,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "last_exposure_multiplier": last_params[9] if last_params else "",
         }
         append_csv_row(RUN_HISTORY_FILE, run_row)
-        append_fund_history_row(csv_name, "run", run_row)
+        append_fund_history_row(fund_group, "run", run_row)
         refresh_top5_parameter_sets()
 
         log_print("\n=== COMPLETED ===")
@@ -2998,6 +3210,10 @@ if __name__ == "__main__":
         normalize_ema_bounds(args.rsi_overbought_bounds, "--rsi-overbought-bounds", minimum=1),
     )
     gene_bound_overrides = build_gene_bound_overrides_from_args(args)
+    if args.initial_capital <= 0:
+        raise ValueError("--initial-capital must be > 0")
+    if args.take_profit_pct is not None and not 0 <= args.take_profit_pct <= 100:
+        raise ValueError("--take-profit-pct must be between 0 and 100")
     if args.ga_search_preset == "focused":
         mutation_rates = normalize_float_ranges(args.mutation_rates, [0.01])
         crossover_rates = normalize_float_ranges(args.crossover_rates, [0.6])
@@ -3018,7 +3234,9 @@ if __name__ == "__main__":
         f"rsi_oversold_bounds={rsi_oversold_bounds}, rsi_overbought_bounds={rsi_overbought_bounds}, "
         f"gene_bound_overrides={gene_bound_overrides}, "
         f"download_years={args.download_years}, ga_seed={args.ga_seed}, "
-        f"data_file={args.data_file}, data_files={args.data_files}, fund_glob={args.fund_glob}, "
+        f"initial_capital={args.initial_capital}, "
+        f"take_profit_pct={args.take_profit_pct if args.take_profit_pct is not None else 'disabled'}, "
+        f"data_file={args.data_file}, data_files={args.data_files}, data_glob={args.data_glob}, "
         f"price_column={args.price_column}, profile_override_preset={args.profile_override_preset}, "
         f"ga_search_preset={args.ga_search_preset}, mutation_rates={mutation_rates}, "
         f"crossover_rates={crossover_rates}, reuse_tuned_params={reuse_tuned_params}\n"
@@ -3034,10 +3252,10 @@ if __name__ == "__main__":
     elif args.data_file:
         downloaded_files.append(args.data_file)
     else:
-        local_fund_files = sorted(str(path.resolve()) for path in DATA_DIR.glob(args.fund_glob))
+        local_fund_files = sorted(str(path.resolve()) for path in DATA_DIR.glob(args.data_glob))
         if local_fund_files:
             downloaded_files.extend(local_fund_files)
-            print(f"Found {len(local_fund_files)} local fund CSV file(s) in {DATA_DIR} matching {args.fund_glob}.")
+            print(f"Found {len(local_fund_files)} local CSV file(s) in {DATA_DIR} matching {args.data_glob}.")
         else:
             if args.download_years <= 0:
                 raise ValueError("download_years must be > 0")
@@ -3054,7 +3272,7 @@ if __name__ == "__main__":
             offset_months_value=offset_months,
             pop_ranges_value=pop_ranges,
             gen_ranges_value=gen_ranges,
-            initial_capital=10000,
+            initial_capital=args.initial_capital,
             strategy_profile_value=args.strategy_profile,
             ga_seed_value=args.ga_seed,
             mutation_rates_value=mutation_rates,
@@ -3067,5 +3285,10 @@ if __name__ == "__main__":
             price_column_value=args.price_column,
             ga_search_preset_value=args.ga_search_preset,
             profile_override_preset_value=args.profile_override_preset,
+            fund_group_value=args.fund_group,
             gene_bound_overrides=gene_bound_overrides,
+            take_profit_pct_value=args.take_profit_pct,
+            rebuild_source_run_id_value=args.rebuild_source_run_id,
+            rebuild_batch_id_value=args.rebuild_batch_id,
+            rebuild_mode_value=args.rebuild_mode,
         )
