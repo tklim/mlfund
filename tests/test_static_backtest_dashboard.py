@@ -75,11 +75,15 @@ class StaticBacktestDashboardTests(unittest.TestCase):
         self.assertIn(".lens-grid button,.lens-grid a{display:block;min-height:88px", styles)
         self.assertIn(".lens-grid button,.lens-grid a{min-width:185px;min-height:84px", styles)
 
-    def test_buyhold_ranking_has_horizon_controls_and_compact_chart_assets(self):
+    def test_buyhold_ranking_has_run_year_controls_and_compact_chart_assets(self):
         page = (SITE / "buyhold-ranking" / "index.html").read_text(encoding="utf-8")
         self.assertIn("Buy &amp; Hold Ranking", page)
         self.assertIn('href="../index.html"', page)
-        self.assertIn('data-buyhold-source="mixed"', page)
+        self.assertIn('data-buyhold-run="mixed"', page)
+        self.assertIn('data-buyhold-run="run-5"', page)
+        self.assertIn('data-buyhold-run="run-4"', page)
+        self.assertIn('data-buyhold-run="run-3"', page)
+        self.assertIn("Choose the buy-and-hold scored/run duration.", page)
         self.assertIn("data-buyhold-view", page)
         self.assertIn("buyhold-charts", page)
         self.assertTrue(any((SITE / "assets" / "buyhold-charts").glob("*.png")))

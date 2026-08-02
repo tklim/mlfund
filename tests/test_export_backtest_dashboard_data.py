@@ -126,6 +126,26 @@ class BacktestDashboardExporterTests(unittest.TestCase):
         self.assertEqual(eligible[0]["scoredYears"], 4.0)
         self.assertEqual(exporter.best_buyhold_runs(eligible)[0]["id"], "new")
 
+    def test_buyhold_views_group_by_run_years_and_generate_missing_five_year_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "MAUS_RMH_USEquityRMH_nav_5Y.csv"
+            data.write_text(
+                "Date,TotalReturn\n2019-01-01,100\n2020-01-01,110\n2021-01-01,120\n2022-01-01,130\n2023-01-01,140\n2024-01-01,150\n",
+                encoding="utf-8",
+            )
+            rows = [{
+                "run_status": "completed", "data_file": str(data), "backtest_start": "2020-01-01", "backtest_end": "2024-01-01",
+                "buy_hold_annualized_return_pct": "8", "lookback_years": "1", "run_started_at": "2026-08-01",
+                "fund_label": "MAUS_RMH_USEquityRMH", "run_id": "four-year",
+            }]
+            eligible = exporter.supplement_buyhold_run_years(exporter.buyhold_history_rows(rows, data_root=root))
+        groups, views = exporter.buyhold_ranking_views(eligible)
+        self.assertEqual(groups, ["mixed", 5.0, 4.0, 3.0])
+        self.assertEqual(views["run-5"][0]["scoredYears"], 5.0)
+        self.assertTrue(views["run-5"][0]["id"].startswith("generated-"))
+        self.assertEqual(exporter.best_buyhold_runs(eligible, 4.0)[0]["id"], "four-year")
+
     def test_low_resolution_buyhold_chart_uses_scored_window(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -138,6 +158,16 @@ class BacktestDashboardExporterTests(unittest.TestCase):
             self.assertTrue(output.is_file())
             self.assertEqual(len(series[0]), 2)
             self.assertEqual(round(series[1].iloc[-1], 2), 12500.0)
+
+    def test_buyhold_period_metrics_require_and_measure_requested_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "prices.csv"
+            data.write_text("Date,TotalReturn\n2019-01-01,100\n2024-01-01,150\n", encoding="utf-8")
+            metrics = buyhold_charts.buyhold_period_metrics(data, 5.0)
+            self.assertIsNotNone(metrics)
+            self.assertEqual(metrics["start"], "2019-01-01")
+            self.assertEqual(metrics["end"], "2024-01-01")
+            self.assertGreater(metrics["annualized"], 8.0)
 
     def test_annualized_candidates_choose_stronger_metric_and_strategy_tie(self):
         with tempfile.TemporaryDirectory() as directory:

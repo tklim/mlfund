@@ -162,18 +162,18 @@
 
   const buyhold = document.querySelector("[data-buyhold-dashboard]");
   if (buyhold) {
-    const tabs = Array.from(buyhold.querySelectorAll("[data-buyhold-source]"));
+    const tabs = Array.from(buyhold.querySelectorAll("[data-buyhold-run]"));
     const views = Array.from(buyhold.querySelectorAll("[data-buyhold-view]"));
-    let source = "mixed";
+    let run = "mixed";
     function updateBuyhold() {
       tabs.forEach(function (tab) {
-        const selected = tab.dataset.buyholdSource === source;
+        const selected = tab.dataset.buyholdRun === run;
         tab.setAttribute("aria-selected", String(selected));
       });
-      views.forEach(function (view) { view.hidden = view.dataset.source !== source; });
+      views.forEach(function (view) { view.hidden = view.dataset.run !== run; });
     }
     tabs.forEach(function (tab) {
-      tab.addEventListener("click", function () { source = tab.dataset.buyholdSource; updateBuyhold(); });
+      tab.addEventListener("click", function () { run = tab.dataset.buyholdRun; updateBuyhold(); });
     });
     updateBuyhold();
   }

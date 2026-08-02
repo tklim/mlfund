@@ -46,6 +46,43 @@ def buyhold_window(data_file: Path, start: str, end: str) -> tuple[pd.Series, pd
     return dates, INITIAL_CAPITAL * prices / prices.iloc[0]
 
 
+def buyhold_period_metrics(data_file: Path, years: float) -> dict[str, object] | None:
+    """Return a trailing buy-and-hold window when the CSV covers the requested duration."""
+    try:
+        frame = pd.read_csv(data_file)
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if "Date" not in frame:
+        return None
+    price_column = "TotalReturn" if "TotalReturn" in frame else "NAV" if "NAV" in frame else None
+    if price_column is None:
+        return None
+    clean = pd.DataFrame({
+        "date": pd.to_datetime(frame["Date"], errors="coerce"),
+        "price": pd.to_numeric(frame[price_column], errors="coerce"),
+    }).dropna()
+    clean = clean[clean["price"] > 0].sort_values("date")
+    if len(clean) < 2 or years <= 0:
+        return None
+    end_date = clean["date"].iloc[-1]
+    requested_start = end_date - pd.DateOffset(years=years)
+    window = clean[clean["date"] >= requested_start]
+    if len(window) < 2:
+        return None
+    actual_days = (window["date"].iloc[-1] - window["date"].iloc[0]).days
+    if actual_days < years * 365.25 * 0.95:
+        return None
+    growth = window["price"].iloc[-1] / window["price"].iloc[0]
+    if growth <= 0 or actual_days <= 0:
+        return None
+    annualized = (growth ** (365.25 / actual_days) - 1) * 100
+    return {
+        "start": window["date"].iloc[0].strftime("%Y-%m-%d"),
+        "end": window["date"].iloc[-1].strftime("%Y-%m-%d"),
+        "annualized": round(float(annualized), 8),
+    }
+
+
 def generate_buyhold_chart(data_file: Path, start: str, end: str, output_path: Path) -> bool:
     series = buyhold_window(data_file, start, end)
     if series is None:
