@@ -62,6 +62,19 @@ class StaticBacktestDashboardTests(unittest.TestCase):
         master = (SITE / "index.html").read_text(encoding="utf-8")
         self.assertIn('href="excess-ranking/index.html"', master)
 
+    def test_master_has_four_compact_overview_cards_without_chart_gallery(self):
+        master = (SITE / "index.html").read_text(encoding="utf-8")
+        styles = (SITE / "assets" / "styles.css").read_text(encoding="utf-8")
+        overview = re.search(r'<section class="lens-grid".*?</section>', master)
+        self.assertIsNotNone(overview)
+        self.assertEqual(overview.group(0).count('<button'), 1)
+        self.assertEqual(overview.group(0).count('<a href='), 3)
+        self.assertNotIn("Chart gallery", overview.group(0))
+        self.assertIn('<span>4</span><strong>Buy &amp; hold horizons</strong>', overview.group(0))
+        self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", styles)
+        self.assertIn(".lens-grid button,.lens-grid a{display:block;min-height:88px", styles)
+        self.assertIn(".lens-grid button,.lens-grid a{min-width:185px;min-height:84px", styles)
+
     def test_buyhold_ranking_has_horizon_controls_and_compact_chart_assets(self):
         page = (SITE / "buyhold-ranking" / "index.html").read_text(encoding="utf-8")
         self.assertIn("Buy &amp; Hold Ranking", page)
