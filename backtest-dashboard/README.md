@@ -1,27 +1,21 @@
 # Backtest Intelligence
 
-Standalone vinext dashboard for reviewing fixed-parameter fund backtests. This application is isolated from the nested `dashboard/` Fund Signal repository and has its own Cloudflare Sites configuration.
+A standalone static dashboard for reviewing fixed-parameter fund backtests. It is independent from the separate live dashboard repository.
 
-## Local development
+## View locally
 
-```powershell
-npm install
-npm run dev
-```
+Double-click `site/index.html`. The generated pages use only relative links, so they work from `file://`, any basic web server, a GitHub Pages project path, or a custom domain.
 
-## Refresh generated data
+## Refresh generated pages
 
-Run from the parent `mlfund` repository:
+From the parent repository:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/refresh_backtest_dashboard.ps1
 ```
 
-Do not edit `app/backtest-data.generated.ts` or `public/backtests/` manually. They are generated from the pipeline's latest successful final-backtest summary and persistent run history.
+The exporter selects the newest successful final-backtest summary, enriches each fund with its best valid historical run, copies stable chart assets, and rebuilds only `site/`. Shared maintainable assets live in `source/`; do not edit generated files under `site/` directly.
 
-## Validation
+## Publish
 
-```powershell
-npm run build
-node --test tests/rendered-html.test.mjs
-```
+The repository includes a manual GitHub Pages workflow. Running `Publish Backtest Dashboard to GitHub Pages` uploads `site/` unchanged and requires no Node build.

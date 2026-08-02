@@ -1,9 +1,9 @@
-"""Export a self-contained snapshot for the standalone backtest dashboard."""
+"""Generate the standalone, dependency-free Backtest Intelligence website."""
 
 from __future__ import annotations
 
 import csv
-import json
+import html
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -12,9 +12,9 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 TUNINGS = ROOT / "outputs" / "tunings"
-APP = ROOT / "backtest-dashboard"
-OUTPUT = APP / "app" / "backtest-data.generated.ts"
-ASSETS = APP / "public" / "backtests"
+PROJECT = ROOT / "backtest-dashboard"
+SOURCE = PROJECT / "source"
+SITE = PROJECT / "site"
 
 FUND_NAMES = {
     "MAKGCF_GreaterChina": ("MAKGCF", "Greater China"),
@@ -30,14 +30,20 @@ FUND_NAMES = {
     "MSGLR_RM_ShariahGlobalREITMYR": ("MSGLR", "Shariah Global REIT"),
 }
 
+CHARTS = (
+    ("latestTechnical", "latest_chart_file", "latest-technical", "Latest technical", "Full local history replay with signals, RSI and portfolio value."),
+    ("sourceTechnical", "technical_chart_file", "source-technical", "Source technical", "The original evaluation window used for the selected parameters."),
+    ("sourceSimple", "simple_chart_file", "source-simple", "Simple comparison", "A concise strategy-versus-buy-and-hold result view."),
+)
+
 
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return list(csv.DictReader(handle))
 
 
-def number(row: dict[str, str], key: str, digits: int = 2) -> float | None:
-    value = row.get(key, "")
+def number(row: dict[str, str] | None, key: str, digits: int = 2) -> float | None:
+    value = (row or {}).get(key, "")
     if value is None or not str(value).strip():
         return None
     try:
@@ -46,7 +52,7 @@ def number(row: dict[str, str], key: str, digits: int = 2) -> float | None:
         return None
 
 
-def integer(row: dict[str, str], key: str) -> int | None:
+def integer(row: dict[str, str] | None, key: str) -> int | None:
     value = number(row, key, 0)
     return None if value is None else int(value)
 
@@ -76,15 +82,19 @@ def best_history_rows(rows: Iterable[dict[str, str]]) -> dict[str, dict[str, str
         if fund not in FUND_NAMES or excess is None or excess == 0:
             continue
         incumbent = best.get(fund)
-        incumbent_excess = number(incumbent, "excess_annualized_return_pct", 8) if incumbent else None
+        incumbent_excess = number(incumbent, "excess_annualized_return_pct", 8)
         candidate_key = (excess, row.get("run_started_at", ""), row.get("run_id", ""))
-        incumbent_key = (incumbent_excess, incumbent.get("run_started_at", ""), incumbent.get("run_id", "")) if incumbent and incumbent_excess is not None else None
+        incumbent_key = None if incumbent_excess is None else (
+            incumbent_excess,
+            incumbent.get("run_started_at", ""),
+            incumbent.get("run_id", ""),
+        )
         if incumbent_key is None or candidate_key > incumbent_key:
             best[fund] = row
     return best
 
 
-def metric_block(row: dict[str, str], prefix: str = "") -> dict[str, object]:
+def metric_block(row: dict[str, str] | None, prefix: str = "") -> dict[str, float | None]:
     return {
         "totalReturn": number(row, f"{prefix}adaptive_return_pct"),
         "buyHoldReturn": number(row, f"{prefix}buy_hold_return_pct"),
@@ -97,18 +107,6 @@ def metric_block(row: dict[str, str], prefix: str = "") -> dict[str, object]:
     }
 
 
-def copy_chart(source: str | None, code: str, kind: str) -> str | None:
-    if not source:
-        return None
-    path = Path(source)
-    if not path.exists():
-        return None
-    ASSETS.mkdir(parents=True, exist_ok=True)
-    destination = ASSETS / f"{code.lower()}-{kind}{path.suffix.lower()}"
-    shutil.copy2(path, destination)
-    return f"/backtests/{destination.name}"
-
-
 def build_snapshot(summary_path: Path, rows: list[dict[str, str]], history: list[dict[str, str]]) -> dict[str, object]:
     historical = best_history_rows(history)
     funds: list[dict[str, object]] = []
@@ -117,10 +115,7 @@ def build_snapshot(summary_path: Path, rows: list[dict[str, str]], history: list
         if label not in FUND_NAMES:
             continue
         code, name = FUND_NAMES[label]
-        history_row = historical.get(label, {})
-        latest = metric_block(row, "latest_")
-        source = metric_block(row)
-        best = metric_block(history_row)
+        history_row = historical.get(label)
         fund = {
             "id": label,
             "slug": code.lower(),
@@ -132,44 +127,34 @@ def build_snapshot(summary_path: Path, rows: list[dict[str, str]], history: list
             "latestEnd": row.get("latest_data_end") or None,
             "sourceStart": row.get("data_start") or None,
             "sourceEnd": row.get("data_end") or None,
-            "latest": latest,
-            "source": source,
+            "latest": metric_block(row, "latest_"),
+            "source": metric_block(row),
             "historicalBest": {
-                **best,
+                **metric_block(history_row),
                 "lookbackYears": number(history_row, "lookback_years", 1),
                 "offsetMonths": integer(history_row, "offset_months"),
-                "start": history_row.get("backtest_start") or None,
-                "end": history_row.get("backtest_end") or None,
-                "runId": history_row.get("run_id") or None,
+                "start": (history_row or {}).get("backtest_start") or None,
+                "end": (history_row or {}).get("backtest_end") or None,
+                "runId": (history_row or {}).get("run_id") or None,
             },
             "parameters": {
-                "shortEma": integer(row, "short_ema"),
-                "longEma": integer(row, "long_ema"),
-                "stopLoss": number(row, "stop_loss"),
-                "cooldown": integer(row, "cooldown"),
-                "drawdownExit": number(row, "drawdown_exit_pct"),
-                "reentryRebound": number(row, "reentry_rebound_pct"),
-                "rsiOversold": integer(row, "rsi_oversold"),
-                "rsiOverbought": integer(row, "rsi_overbought"),
+                "shortEma": integer(row, "short_ema"), "longEma": integer(row, "long_ema"),
+                "stopLoss": number(row, "stop_loss"), "cooldown": integer(row, "cooldown"),
+                "drawdownExit": number(row, "drawdown_exit_pct"), "reentryRebound": number(row, "reentry_rebound_pct"),
+                "rsiOversold": integer(row, "rsi_oversold"), "rsiOverbought": integer(row, "rsi_overbought"),
                 "exposure": number(row, "exposure_multiplier"),
             },
             "statistics": {
-                "trades": integer(row, "trade_count"),
-                "winRate": number(row, "win_rate_pct"),
-                "timeInvested": number(row, "time_invested_pct"),
-                "uptrendCash": number(row, "uptrend_cash_pct"),
-                "missedUpside": number(row, "missed_upside_after_exit_pct"),
-                "stopLossCount": integer(row, "stop_loss_count"),
+                "trades": integer(row, "trade_count"), "winRate": number(row, "win_rate_pct"),
+                "timeInvested": number(row, "time_invested_pct"), "uptrendCash": number(row, "uptrend_cash_pct"),
+                "missedUpside": number(row, "missed_upside_after_exit_pct"), "stopLossCount": integer(row, "stop_loss_count"),
             },
-            "charts": {
-                "latestTechnical": copy_chart(row.get("latest_chart_file"), code, "latest-technical"),
-                "sourceTechnical": copy_chart(row.get("technical_chart_file"), code, "source-technical"),
-                "sourceSimple": copy_chart(row.get("simple_chart_file"), code, "source-simple"),
-            },
+            "chartSources": {key: row.get(column) or None for key, column, *_ in CHARTS},
+            "charts": {},
         }
         funds.append(fund)
 
-    funds.sort(key=lambda item: (item["latest"]["totalReturn"] is not None, item["latest"]["totalReturn"] or float("-inf"), item["code"]), reverse=True)
+    funds.sort(key=lambda item: (item["latest"]["totalReturn"] is None, -(item["latest"]["totalReturn"] or 0), item["code"]))
     for index, fund in enumerate(funds, start=1):
         fund["rank"] = index
     latest_end = max((fund["latestEnd"] or "" for fund in funds), default="") or None
@@ -183,25 +168,189 @@ def build_snapshot(summary_path: Path, rows: list[dict[str, str]], history: list
     }
 
 
-def write_snapshot(snapshot: dict[str, object]) -> None:
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=False)
-    OUTPUT.write_text(
-        "// Generated by scripts/export_backtest_dashboard_data.py. Do not edit manually.\n"
-        "export type BacktestMetrics = { totalReturn: number | null; buyHoldReturn: number | null; excessReturn: number | null; annualized: number | null; buyHoldAnnualized: number | null; excessAnnualized: number | null; sharpe: number | null; maxDrawdown: number | null };\n"
-        "export type BacktestFund = { id: string; slug: string; code: string; name: string; rank: number; signal: string; lastTradeDate: string | null; latestStart: string | null; latestEnd: string | null; sourceStart: string | null; sourceEnd: string | null; latest: BacktestMetrics; source: BacktestMetrics; historicalBest: BacktestMetrics & { lookbackYears: number | null; offsetMonths: number | null; start: string | null; end: string | null; runId: string | null }; parameters: Record<string, number | null>; statistics: Record<string, number | null>; charts: Record<string, string | null> };\n"
-        "export type BacktestSnapshot = { generatedAt: string; sourceSummary: string; runCompletedAt: string | null; latestObservation: string | null; funds: BacktestFund[] };\n"
-        f"export const backtestSnapshot: BacktestSnapshot = {payload};\n",
-        encoding="utf-8",
+def esc(value: object) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def pct(value: float | None, signed: bool = True) -> str:
+    if value is None:
+        return "—"
+    sign = "+" if signed and value > 0 else ""
+    return f"{sign}{value:.2f}%"
+
+
+def num(value: float | None, digits: int = 2) -> str:
+    return "—" if value is None else f"{value:.{digits}f}"
+
+
+def value_attr(value: float | None, drawdown: bool = False) -> str:
+    if value is None:
+        return ""
+    return str(-abs(value) if drawdown else value)
+
+
+def date_text(value: str | None) -> str:
+    if not value:
+        return "Unavailable"
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").strftime("%d %b %Y")
+    except ValueError:
+        return value
+
+
+def tone(value: float | None) -> str:
+    return "muted" if value is None else "positive" if value >= 0 else "negative"
+
+
+def signal_class(signal: str) -> str:
+    return "buy" if signal.startswith("BUY") else "cash" if signal.startswith("SELL") else "unknown"
+
+
+def page_head(title: str, prefix: str, description: str) -> str:
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{esc(title)}</title><meta name="description" content="{esc(description)}">
+<meta property="og:title" content="{esc(title)}"><meta property="og:description" content="{esc(description)}"><meta property="og:image" content="{prefix}assets/og.png">
+<link rel="icon" href="{prefix}assets/og.png"><link rel="stylesheet" href="{prefix}assets/styles.css">
+<script defer src="{prefix}assets/dashboard.js"></script></head>"""
+
+
+def theme_button() -> str:
+    return '<button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark mode" aria-pressed="false"><span aria-hidden="true">☾</span><b>Dark</b></button>'
+
+
+def brand(href: str) -> str:
+    return f'<a class="brand" href="{href}"><span class="brand-mark">BI</span><span><b>Backtest Intelligence</b><small>Strategy evidence hub</small></span></a>'
+
+
+def result_attrs(fund: dict[str, object]) -> str:
+    metrics = fund["latest"]
+    return (
+        f'data-fund-result data-code="{esc(fund["code"])}" data-search="{esc((fund["code"] + " " + fund["name"]).lower())}" '
+        f'data-latest="{value_attr(metrics["totalReturn"])}" data-annualized="{value_attr(metrics["annualized"])}" '
+        f'data-buy-hold="{value_attr(metrics["buyHoldAnnualized"])}" data-excess="{value_attr(metrics["excessAnnualized"])}" '
+        f'data-drawdown="{value_attr(metrics["maxDrawdown"], True)}"'
     )
+
+
+def render_table_row(fund: dict[str, object]) -> str:
+    m, stats = fund["latest"], fund["statistics"]
+    href = f'funds/{fund["slug"]}/index.html'
+    wins = (m["annualized"] if m["annualized"] is not None else float("-inf")) >= (m["buyHoldAnnualized"] if m["buyHoldAnnualized"] is not None else float("-inf"))
+    signal = fund["signal"]
+    return f"""<tr {result_attrs(fund)}><td data-rank>#{fund['rank']}</td><td><a class="fund-identity" href="{href}"><strong>{esc(fund['code'])}</strong><span>{esc(fund['name'])}</span><small class="signal {signal_class(signal)}"><i></i>{esc(signal)}</small></a></td>
+<td class="{tone(m['totalReturn'])}"><b>{pct(m['totalReturn'])}</b></td>
+<td class="column-annualized {tone(m['annualized'])}">{pct(m['annualized'])} {'<em>W</em>' if wins else ''}</td>
+<td class="column-buyHold {tone(m['buyHoldAnnualized'])}">{pct(m['buyHoldAnnualized'])} {'<em>W</em>' if not wins else ''}</td>
+<td class="column-excess {tone(m['excessAnnualized'])}">{pct(m['excessAnnualized'])}</td>
+<td class="column-drawdown negative">{pct(m['maxDrawdown'], False)}</td>
+<td class="column-sharpe column-hidden">{num(m['sharpe'])}</td><td class="column-trades column-hidden">{stats['trades'] if stats['trades'] is not None else '—'}</td>
+<td><a class="row-arrow" href="{href}" aria-label="Open {esc(fund['name'])} backtest detail">→</a></td></tr>"""
+
+
+def render_mobile_card(fund: dict[str, object]) -> str:
+    m, signal = fund["latest"], fund["signal"]
+    return f"""<a href="funds/{fund['slug']}/index.html" class="mobile-result" {result_attrs(fund)}><span class="mobile-rank" data-rank>#{fund['rank']}</span><span class="mobile-title"><strong>{esc(fund['code'])}</strong><small>{esc(fund['name'])}</small></span><span class="signal {signal_class(signal)}"><i></i>{esc(signal)}</span><dl><div><dt>Latest</dt><dd>{pct(m['totalReturn'])}</dd></div><div><dt>Annualized</dt><dd>{pct(m['annualized'])}</dd></div><div><dt>Excess</dt><dd>{pct(m['excessAnnualized'])}</dd></div></dl><b class="mobile-arrow">→</b></a>"""
+
+
+def render_master(snapshot: dict[str, object]) -> str:
+    funds = snapshot["funds"]
+    leader = max(funds, key=lambda f: f["latest"]["totalReturn"] if f["latest"]["totalReturn"] is not None else float("-inf"))
+    excess_leader = max(funds, key=lambda f: f["historicalBest"]["excessAnnualized"] if f["historicalBest"]["excessAnnualized"] is not None else float("-inf"))
+    buys = sum(fund["signal"].startswith("BUY") for fund in funds)
+    rows = "".join(render_table_row(fund) for fund in funds)
+    cards = "".join(render_mobile_card(fund) for fund in funds)
+    columns = (("annualized", "Strategy ann.", True), ("buyHold", "B&H ann.", True), ("excess", "Excess", True), ("drawdown", "Drawdown", True), ("sharpe", "Sharpe", False), ("trades", "Trades", False))
+    checks = "".join(f'<label><input type="checkbox" data-column="{key}" {"checked" if checked else ""}>{label}</label>' for key, label, checked in columns)
+    return page_head("Backtest Intelligence", "", "Independent strategy backtest rankings and evidence.") + f"""<body><div class="site-shell" data-master-dashboard>
+<header class="topbar">{brand('index.html')}<div class="top-actions"><span class="fresh"><i></i>Local snapshot · {date_text(snapshot['latestObservation'])}</span>{theme_button()}</div></header>
+<main class="master-shell"><section class="hero"><span class="eyebrow">BACKTEST INTELLIGENCE HUB</span><h1>Every strategy. One evidence trail.</h1><p>Compare full-history replays, rank adaptive strategies against buy and hold, and open every fund’s technical evidence from one independent workspace.</p><div class="hero-pills"><span>{len(funds)} funds</span><span>Latest local data {esc(snapshot['latestObservation'])}</span><span>Run completed {esc((snapshot['runCompletedAt'] or 'Unavailable')[:16])}</span></div></section>
+<section class="kpi-grid" aria-label="Backtest summary"><article><span>Latest leader</span><strong>{leader['code']} · {pct(leader['latest']['totalReturn'])}</strong></article><article><span>Best historical excess</span><strong>{excess_leader['code']} · {pct(excess_leader['historicalBest']['excessAnnualized'])}</strong></article><article><span>Buy signals</span><strong>{buys} of {len(funds)}</strong></article><article><span>Newest observation</span><strong>{esc(snapshot['latestObservation'])}</strong></article></section>
+<section class="lens-grid" aria-label="Backtest views"><button type="button" data-preset="latest"><span>1</span><strong>Latest results</strong><p>Rank the most recent full-history replay.</p></button><button type="button" data-preset="excess"><span>2</span><strong>Historical excess</strong><p>Find the strongest run versus buy and hold.</p></button><button type="button" data-preset="annualized"><span>3</span><strong>Annualized return</strong><p>Compare long-run strategy compounding.</p></button><button type="button" data-preset="latest"><span>4</span><strong>Chart gallery</strong><p>Open a fund to inspect all three charts.</p></button><button type="button" data-preset="buyHold"><span>5</span><strong>Buy &amp; hold horizons</strong><p>Contrast the strategy with passive exposure.</p></button></section>
+<section class="ranking-panel" id="ranking" aria-labelledby="ranking-title"><div class="ranking-toolbar"><div><span class="eyebrow dark">LATEST REPLAY</span><h2 id="ranking-title">Backtest rankings</h2></div><label class="search"><span class="sr-only">Search fund name or code</span><input type="search" data-search placeholder="Search name or code"></label></div>
+<div class="sortbar"><span class="sort-label">SORT FUNDS</span><div class="sort-pills"><button class="selected" type="button" data-sort="latest">Latest strategy</button><button type="button" data-sort="annualized">Strategy ann.</button><button type="button" data-sort="buyHold">B&amp;H ann.</button><button type="button" data-sort="excess">Excess</button><button type="button" data-sort="drawdown">Drawdown</button></div><div class="sort-actions"><button class="direction" type="button" data-direction>Highest first ↓</button><details class="columns"><summary>Columns (<span data-column-count>7</span>)</summary><div>{checks}</div></details></div></div>
+<p class="table-note"><span><span data-result-count>{len(funds)}</span> funds · {buys} buy signals · <b>W</b> marks the stronger annualized result</span><span>All data through <strong>{esc(snapshot['latestObservation'])}</strong></span></p><noscript><p class="noscript-note">Interactive search, sorting, columns and theme require JavaScript; all results and detail links remain available.</p></noscript>
+<div class="table-wrap"><table><thead><tr><th>#</th><th>Fund / signal</th><th>Latest strategy</th><th class="column-annualized">Strategy ann.</th><th class="column-buyHold">B&amp;H ann.</th><th class="column-excess">Excess</th><th class="column-drawdown">Drawdown</th><th class="column-sharpe column-hidden">Sharpe</th><th class="column-trades column-hidden">Trades</th><th aria-label="Open fund detail"></th></tr></thead><tbody>{rows}</tbody></table></div><div class="mobile-results">{cards}</div><p class="empty-results" data-empty-results hidden>No funds match this search.</p></section></main>
+<footer>Generated from {esc(snapshot['sourceSummary'])} · Standalone backtest workspace</footer></div></body></html>"""
+
+
+def metric_card(label: str, metrics: dict[str, object], historical: bool = False) -> str:
+    note = "<p>Best valid completed historical run</p>" if historical else ""
+    return f"""<article class="metric-card"><span>{label}</span><strong class="{tone(metrics['annualized'])}">{pct(metrics['annualized'])}</strong><small>Annualized strategy</small><dl><div><dt>Total return</dt><dd>{pct(metrics['totalReturn'])}</dd></div><div><dt>Buy &amp; hold ann.</dt><dd>{pct(metrics['buyHoldAnnualized'])}</dd></div><div><dt>Excess ann.</dt><dd class="{tone(metrics['excessAnnualized'])}">{pct(metrics['excessAnnualized'])}</dd></div><div><dt>Sharpe</dt><dd>{num(metrics['sharpe'])}</dd></div></dl>{note}</article>"""
+
+
+def render_detail(fund: dict[str, object]) -> str:
+    m, params, stats, charts = fund["latest"], fund["parameters"], fund["statistics"], fund["charts"]
+    signal = fund["signal"]
+    parameter_values = (
+        ("Short / long EMA", f"{params['shortEma'] if params['shortEma'] is not None else '—'} / {params['longEma'] if params['longEma'] is not None else '—'}"),
+        ("RSI guards", f"{params['rsiOversold'] if params['rsiOversold'] is not None else '—'} / {params['rsiOverbought'] if params['rsiOverbought'] is not None else '—'}"),
+        ("Stop loss", pct(params["stopLoss"], False)), ("Cooldown", f"{params['cooldown'] if params['cooldown'] is not None else '—'} days"),
+        ("Drawdown exit", pct(params["drawdownExit"], False)), ("Reentry rebound", pct(params["reentryRebound"], False)),
+        ("Exposure", f"{num(params['exposure'])}×"), ("Trades", stats["trades"] if stats["trades"] is not None else "—"),
+        ("Win rate", pct(stats["winRate"], False)), ("Time invested", pct(stats["timeInvested"], False)),
+        ("Uptrend cash", pct(stats["uptrendCash"], False)), ("Stop-loss exits", stats["stopLossCount"] if stats["stopLossCount"] is not None else "—"),
+    )
+    parameters_html = "".join(f"<article><span>{label}</span><strong>{esc(value)}</strong></article>" for label, value in parameter_values)
+    available = next((item for item in CHARTS if charts.get(item[0])), None)
+    tabs = "".join(
+        f'<button role="tab" data-chart-tab aria-selected="{str(item == available).lower()}" class="{"selected" if item == available else ""}" {"" if charts.get(item[0]) else "disabled"} data-src="{esc(charts.get(item[0]) or "")}" data-description="{esc(item[4])}" data-alt="{esc(fund["name"] + " " + item[3].lower() + " backtest chart")}">{item[3]}</button>'
+        for item in CHARTS
+    )
+    initial_src = charts.get(available[0]) if available else ""
+    initial_description = available[4] if available else "No chart assets were produced for this run."
+    frame_class = "chart-frame" if initial_src else "chart-frame is-hidden"
+    unavailable_class = "chart-unavailable is-hidden" if initial_src else "chart-unavailable"
+    return page_head(f"{fund['code']} · Backtest Intelligence", "../../", f"Backtest evidence and diagnostics for {fund['name']}.") + f"""<body><div class="site-shell detail-page"><header class="topbar">{brand('../../index.html')}{theme_button()}</header><main class="detail-shell"><a class="back-link" href="../../index.html">← Master dashboard</a>
+<section class="detail-heading"><div><span class="eyebrow dark">FUND BACKTEST · LATEST RANK #{fund['rank']}</span><h1>{esc(fund['name'])}</h1><p>{esc(fund['code'])} · Full strategy evidence and replay diagnostics</p></div><span class="signal large {signal_class(signal)}"><i></i>{esc(signal)}</span></section>
+<section class="detail-facts"><span>Latest history <b>{date_text(fund['latestStart'])} — {date_text(fund['latestEnd'])}</b></span><span>Source window <b>{date_text(fund['sourceStart'])} — {date_text(fund['sourceEnd'])}</b></span><span>Last trade <b>{date_text(fund['lastTradeDate'])}</b></span></section>
+<section class="detail-metrics">{metric_card('Latest full history', m)}{metric_card('Source replay', fund['source'])}{metric_card('Historical leader', fund['historicalBest'], True)}</section>
+<section class="parameter-panel"><div class="section-heading"><div><span class="eyebrow dark">SELECTED STRATEGY</span><h2>Parameters and run quality</h2></div></div><div class="parameter-grid">{parameters_html}</div></section>
+<section class="chart-panel" data-chart-panel><div class="section-heading"><div><span class="eyebrow dark">VISUAL EVIDENCE</span><h2>Backtest charts</h2><p class="chart-description" data-chart-description>{esc(initial_description)}</p></div></div><div class="chart-tabs" role="tablist" aria-label="Backtest chart type">{tabs}</div><a class="{frame_class}" data-chart-frame href="{esc(initial_src)}" target="_blank" rel="noreferrer"><img src="{esc(initial_src)}" alt="{esc(fund['name'])} backtest chart"><span>Open full-size chart ↗</span></a><div class="{unavailable_class}" data-chart-unavailable><div><strong>Chart unavailable</strong><p>This run did not produce the selected chart asset.</p></div></div></section></main>
+<footer>{esc(fund['code'])} · Data through {esc(fund['latestEnd'] or 'unavailable')} · Past simulated results do not predict future performance.</footer></div></body></html>"""
+
+
+def build_site(snapshot: dict[str, object], site: Path = SITE, source: Path = SOURCE) -> None:
+    project = site.parent.resolve()
+    staging = project / ".site-build"
+    if staging.exists():
+        shutil.rmtree(staging)
+    assets = staging / "assets"
+    charts_dir = assets / "charts"
+    charts_dir.mkdir(parents=True)
+    for filename in ("styles.css", "dashboard.js", "og.png"):
+        shutil.copy2(source / filename, assets / filename)
+
+    for fund in snapshot["funds"]:
+        generated: dict[str, str | None] = {}
+        for key, _, suffix, _, _ in CHARTS:
+            chart_source = fund["chartSources"].get(key)
+            path = Path(chart_source) if chart_source else None
+            if path and path.is_file():
+                destination = charts_dir / f"{fund['slug']}-{suffix}{path.suffix.lower()}"
+                shutil.copy2(path, destination)
+                generated[key] = f"../../assets/charts/{destination.name}"
+            else:
+                generated[key] = None
+        fund["charts"] = generated
+
+    (staging / "index.html").write_text(render_master(snapshot), encoding="utf-8")
+    for fund in snapshot["funds"]:
+        fund_dir = staging / "funds" / fund["slug"]
+        fund_dir.mkdir(parents=True)
+        (fund_dir / "index.html").write_text(render_detail(fund), encoding="utf-8")
+
+    if site.exists():
+        shutil.rmtree(site)
+    shutil.move(str(staging), str(site))
 
 
 def main() -> None:
     summary_path, rows = latest_successful_summary(TUNINGS.glob("final_backtest_summary_*.csv"))
-    history_path = TUNINGS / "backtest_run_history.csv"
-    snapshot = build_snapshot(summary_path, rows, read_csv(history_path))
-    write_snapshot(snapshot)
-    print(f"Exported {len(snapshot['funds'])} funds from {summary_path.name} to {OUTPUT}")
+    snapshot = build_snapshot(summary_path, rows, read_csv(TUNINGS / "backtest_run_history.csv"))
+    build_site(snapshot)
+    print(f"Generated {len(snapshot['funds'])} fund pages from {summary_path.name}")
+    print(f"Open locally: {(SITE / 'index.html').resolve()}")
 
 
 if __name__ == "__main__":

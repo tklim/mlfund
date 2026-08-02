@@ -2,7 +2,6 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from scripts import export_backtest_dashboard_data as exporter
 
@@ -47,11 +46,33 @@ class BacktestDashboardExporterTests(unittest.TestCase):
             {**base, "fund_label": "MAKGCF_GreaterChina", "latest_adaptive_return_pct": "12"},
             {**base, "fund_label": "HWFL_HWFlexi", "latest_adaptive_return_pct": "4"},
         ]
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(exporter, "ASSETS", Path(directory)):
-            snapshot = exporter.build_snapshot(Path("final_backtest_summary_test.csv"), rows, [])
-        self.assertEqual([fund["code"] for fund in snapshot["funds"]], ["MAPAC", "MAKGCF", "HWFL"])
+        snapshot = exporter.build_snapshot(Path("final_backtest_summary_test.csv"), rows, [])
+        self.assertEqual([fund["code"] for fund in snapshot["funds"]], ["MAKGCF", "MAPAC", "HWFL"])
         self.assertEqual([fund["rank"] for fund in snapshot["funds"]], [1, 2, 3])
-        self.assertIsNone(snapshot["funds"][0]["charts"]["latestTechnical"])
+        self.assertEqual(snapshot["funds"][0]["chartSources"]["latestTechnical"], "missing.png")
+
+    def test_static_build_copies_available_chart_and_marks_missing_chart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            (source / "styles.css").write_text("body{}", encoding="utf-8")
+            (source / "dashboard.js").write_text("// test", encoding="utf-8")
+            (source / "og.png").write_bytes(b"png")
+            chart = root / "chart.png"
+            chart.write_bytes(b"chart")
+            row = {
+                "status": "completed", "fund_label": "MAKGCF_GreaterChina",
+                "latest_adaptive_return_pct": "10", "latest_chart_file": str(chart),
+                "technical_chart_file": str(root / "missing.png"), "simple_chart_file": "",
+            }
+            snapshot = exporter.build_snapshot(Path("final_backtest_summary_test.csv"), [row], [])
+            site = root / "site"
+            exporter.build_site(snapshot, site=site, source=source)
+            detail = (site / "funds" / "makgcf" / "index.html").read_text(encoding="utf-8")
+            self.assertTrue((site / "assets" / "charts" / "makgcf-latest-technical.png").is_file())
+            self.assertIn("../../assets/charts/makgcf-latest-technical.png", detail)
+            self.assertIn("Chart unavailable", detail)
 
 
 if __name__ == "__main__":

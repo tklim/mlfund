@@ -6,11 +6,9 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $appRoot = Join-Path $repoRoot "backtest-dashboard"
+$siteRoot = Join-Path $appRoot "site"
 $exporter = Join-Path $PSScriptRoot "export_backtest_dashboard_data.py"
-$allowedPrefixes = @(
-    "backtest-dashboard/app/backtest-data.generated.ts",
-    "backtest-dashboard/public/backtests/"
-)
+$allowedPrefixes = @("backtest-dashboard/site/")
 
 function Get-ChangedPaths {
     return @(
@@ -38,14 +36,8 @@ if ($unexpected.Count -gt 0) {
     throw "Refresh changed unexpected paths: $($unexpected -join ', ')"
 }
 
-Push-Location $appRoot
-try {
-    & npm.cmd run build
-    if ($LASTEXITCODE -ne 0) { throw "Standalone dashboard build failed." }
-    & node --test tests/rendered-html.test.mjs
-    if ($LASTEXITCODE -ne 0) { throw "Standalone dashboard tests failed." }
-} finally {
-    Pop-Location
-}
+& python -m unittest tests.test_export_backtest_dashboard_data tests.test_static_backtest_dashboard
+if ($LASTEXITCODE -ne 0) { throw "Standalone dashboard tests failed." }
 
 Write-Host "Backtest dashboard snapshot refreshed and validated."
+Write-Host "Open locally: $([System.IO.Path]::GetFullPath((Join-Path $siteRoot 'index.html')))"
