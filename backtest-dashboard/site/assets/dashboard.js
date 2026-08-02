@@ -115,6 +115,51 @@
     update();
   }
 
+  document.querySelectorAll("[data-tab-group]").forEach(function (group) {
+    const tabs = Array.from(group.querySelectorAll('[role="tab"]'));
+    group.addEventListener("keydown", function (event) {
+      const current = tabs.indexOf(document.activeElement);
+      if (current < 0) return;
+      let next = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (current + 1) % tabs.length;
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (current - 1 + tabs.length) % tabs.length;
+      if (event.key === "Home") next = 0;
+      if (event.key === "End") next = tabs.length - 1;
+      if (next !== null) { event.preventDefault(); tabs[next].focus(); tabs[next].click(); }
+    });
+  });
+
+  const excess = document.querySelector("[data-excess-dashboard]");
+  if (excess) {
+    const sources = Array.from(excess.querySelectorAll("[data-excess-source]"));
+    const runs = Array.from(excess.querySelectorAll("[data-excess-run]"));
+    const views = Array.from(excess.querySelectorAll("[data-excess-view]"));
+    let source = "mixed";
+    let run = "all";
+
+    function updateExcess() {
+      sources.forEach(function (button) {
+        const selected = button.dataset.excessSource === source;
+        button.setAttribute("aria-selected", String(selected));
+      });
+      runs.forEach(function (button) {
+        const selected = button.dataset.excessRun === run;
+        button.setAttribute("aria-selected", String(selected));
+      });
+      views.forEach(function (view) {
+        view.hidden = !(view.dataset.source === source && view.dataset.run === run);
+      });
+    }
+
+    sources.forEach(function (button) {
+      button.addEventListener("click", function () { source = button.dataset.excessSource; updateExcess(); });
+    });
+    runs.forEach(function (button) {
+      button.addEventListener("click", function () { run = button.dataset.excessRun; updateExcess(); });
+    });
+    updateExcess();
+  }
+
   const chartPanel = document.querySelector("[data-chart-panel]");
   if (chartPanel) {
     const tabs = Array.from(chartPanel.querySelectorAll("[data-chart-tab]"));

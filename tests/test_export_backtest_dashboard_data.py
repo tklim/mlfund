@@ -74,6 +74,37 @@ class BacktestDashboardExporterTests(unittest.TestCase):
             self.assertIn("../../assets/charts/makgcf-latest-technical.png", detail)
             self.assertIn("Chart unavailable", detail)
 
+    def test_excess_history_normalizes_aliases_and_filters_without_chart_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chart = root / "history.png"
+            chart.write_bytes(b"chart")
+            base = {
+                "run_status": "completed", "data_file": "MAUS_RMH_USEquityRMH_nav_5Y.csv",
+                "lookback_years": "2", "excess_annualized_return_pct": "8",
+                "chart_file": str(chart), "run_started_at": "2026-08-01", "run_id": "winner",
+            }
+            rows = [
+                {**base, "fund_label": "MAUSRMHUSEquityRMHnav5Y"},
+                {**base, "fund_label": "MAUS_RMH_USEquityRMH", "run_id": "missing", "chart_file": str(root / "missing.png")},
+            ]
+            eligible = exporter.excess_history_rows(rows)
+        self.assertEqual(len(eligible), 1)
+        self.assertEqual(eligible[0]["code"], "MAUS")
+        self.assertEqual(eligible[0]["sourceYears"], 5.0)
+        self.assertEqual(eligible[0]["runYears"], 3.0)
+
+    def test_excess_ranking_ties_use_newest_run_and_group_per_fund(self):
+        rows = [
+            {"fund": "MAKGCF_GreaterChina", "code": "MAKGCF", "sourceYears": 5.0, "runYears": 3.0, "excessAnnualized": 7.0, "started": "2026-01-01", "id": "old"},
+            {"fund": "MAKGCF_GreaterChina", "code": "MAKGCF", "sourceYears": 5.0, "runYears": 3.0, "excessAnnualized": 7.0, "started": "2026-02-01", "id": "new"},
+            {"fund": "MAPF_Progress", "code": "MAPF", "sourceYears": 3.0, "runYears": 2.0, "excessAnnualized": 8.0, "started": "2026-01-01", "id": "mapf"},
+        ]
+        mixed = exporter.best_excess_runs(rows)
+        five_year = exporter.best_excess_runs(rows, 5.0, 3.0)
+        self.assertEqual([row["code"] for row in mixed], ["MAPF", "MAKGCF"])
+        self.assertEqual(five_year[0]["id"], "new")
+
 
 if __name__ == "__main__":
     unittest.main()

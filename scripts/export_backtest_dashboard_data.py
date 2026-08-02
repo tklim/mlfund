@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import html
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -30,11 +31,20 @@ FUND_NAMES = {
     "MSGLR_RM_ShariahGlobalREITMYR": ("MSGLR", "Shariah Global REIT"),
 }
 
+# Earlier history exports embedded the source-file suffix in two fund labels.
+# Preserve their useful run evidence in the configured 11-fund universe.
+HISTORY_FUND_ALIASES = {
+    "MAUSRMHUSEquityRMHnav5Y": "MAUS_RMH_USEquityRMH",
+    "MSGLRRMShariahGlobalREITMYRnav5Y": "MSGLR_RM_ShariahGlobalREITMYR",
+}
+
 CHARTS = (
     ("latestTechnical", "latest_chart_file", "latest-technical", "Latest technical", "Full local history replay with signals, RSI and portfolio value."),
     ("sourceTechnical", "technical_chart_file", "source-technical", "Source technical", "The original evaluation window used for the selected parameters."),
     ("sourceSimple", "simple_chart_file", "source-simple", "Simple comparison", "A concise strategy-versus-buy-and-hold result view."),
 )
+
+SOURCE_YEARS_PATTERN = re.compile(r"(?:_nav_|nav)(\d+(?:\.\d+)?)Y", re.IGNORECASE)
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -92,6 +102,76 @@ def best_history_rows(rows: Iterable[dict[str, str]]) -> dict[str, dict[str, str
         if incumbent_key is None or candidate_key > incumbent_key:
             best[fund] = row
     return best
+
+
+def normalized_history_label(label: str) -> str:
+    return HISTORY_FUND_ALIASES.get(label, label)
+
+
+def source_years(row: dict[str, str]) -> float | None:
+    match = SOURCE_YEARS_PATTERN.search(row.get("data_file", ""))
+    return round(float(match.group(1)), 2) if match else None
+
+
+def duration_label(value: float | None) -> str:
+    if value is None:
+        return "Unavailable"
+    return f"{int(value) if value.is_integer() else value:g}Y"
+
+
+def history_run_label(row: dict[str, str]) -> str:
+    lookback = duration_label(number(row, "lookback_years", 2))
+    offset = integer(row, "offset_months")
+    profile = row.get("strategy_profile") or "strategy"
+    return f"{lookback}/{offset if offset is not None else '—'}M {profile}"
+
+
+def excess_history_rows(rows: Iterable[dict[str, str]]) -> list[dict[str, object]]:
+    eligible: list[dict[str, object]] = []
+    for row in rows:
+        label = normalized_history_label(row.get("fund_label", ""))
+        excess = number(row, "excess_annualized_return_pct", 8)
+        chart_path = Path(row["chart_file"]) if row.get("chart_file") else None
+        source = source_years(row)
+        lookback = number(row, "lookback_years", 2)
+        if (
+            label not in FUND_NAMES
+            or row.get("run_status", "").lower() != "completed"
+            or excess is None
+            or excess == 0
+            or chart_path is None
+            or not chart_path.is_file()
+        ):
+            continue
+        run_years = round(source - lookback, 2) if source is not None and lookback is not None else None
+        if run_years is not None and run_years <= 0:
+            continue
+        code, name = FUND_NAMES[label]
+        eligible.append({
+            "id": row.get("run_id", ""), "fund": label, "code": code, "name": name,
+            "sourceYears": source, "runYears": run_years, "end": row.get("backtest_end") or row.get("data_end") or None,
+            "started": row.get("run_started_at", ""), "chartPath": chart_path,
+            "excessAnnualized": excess, "strategyAnnualized": number(row, "adaptive_annualized_return_pct"),
+            "buyHoldAnnualized": number(row, "buy_hold_annualized_return_pct"), "label": history_run_label(row),
+        })
+    return eligible
+
+
+def best_excess_runs(rows: Iterable[dict[str, object]], source_group: float | str = "mixed", run_years: float | None = None) -> list[dict[str, object]]:
+    winners: dict[str, dict[str, object]] = {}
+    for row in rows:
+        if source_group != "mixed" and (
+            (source_group == "other" and row["sourceYears"] is not None)
+            or (source_group != "other" and row["sourceYears"] != source_group)
+        ):
+            continue
+        if run_years is not None and row["runYears"] != run_years:
+            continue
+        incumbent = winners.get(row["fund"])
+        key = (row["excessAnnualized"], row["started"], row["id"])
+        if incumbent is None or key > (incumbent["excessAnnualized"], incumbent["started"], incumbent["id"]):
+            winners[row["fund"]] = row
+    return sorted(winners.values(), key=lambda row: (-row["excessAnnualized"], row["code"]))
 
 
 def metric_block(row: dict[str, str] | None, prefix: str = "") -> dict[str, float | None]:
@@ -266,12 +346,65 @@ def render_master(snapshot: dict[str, object]) -> str:
 <header class="topbar">{brand('index.html')}<div class="top-actions"><span class="fresh"><i></i>Local snapshot · {date_text(snapshot['latestObservation'])}</span>{theme_button()}</div></header>
 <main class="master-shell"><section class="hero"><span class="eyebrow">BACKTEST INTELLIGENCE HUB</span><h1>Every strategy. One evidence trail.</h1><p>Compare full-history replays, rank adaptive strategies against buy and hold, and open every fund’s technical evidence from one independent workspace.</p><div class="hero-pills"><span>{len(funds)} funds</span><span>Latest local data {esc(snapshot['latestObservation'])}</span><span>Run completed {esc((snapshot['runCompletedAt'] or 'Unavailable')[:16])}</span></div></section>
 <section class="kpi-grid" aria-label="Backtest summary"><article><span>Latest leader</span><strong>{leader['code']} · {pct(leader['latest']['totalReturn'])}</strong></article><article><span>Best historical excess</span><strong>{excess_leader['code']} · {pct(excess_leader['historicalBest']['excessAnnualized'])}</strong></article><article><span>Buy signals</span><strong>{buys} of {len(funds)}</strong></article><article><span>Newest observation</span><strong>{esc(snapshot['latestObservation'])}</strong></article></section>
-<section class="lens-grid" aria-label="Backtest views"><button type="button" data-preset="latest"><span>1</span><strong>Latest results</strong><p>Rank the most recent full-history replay.</p></button><button type="button" data-preset="excess"><span>2</span><strong>Historical excess</strong><p>Find the strongest run versus buy and hold.</p></button><button type="button" data-preset="annualized"><span>3</span><strong>Annualized return</strong><p>Compare long-run strategy compounding.</p></button><button type="button" data-preset="latest"><span>4</span><strong>Chart gallery</strong><p>Open a fund to inspect all three charts.</p></button><button type="button" data-preset="buyHold"><span>5</span><strong>Buy &amp; hold horizons</strong><p>Contrast the strategy with passive exposure.</p></button></section>
+<section class="lens-grid" aria-label="Backtest views"><button type="button" data-preset="latest"><span>1</span><strong>Latest results</strong><p>Rank the most recent full-history replay.</p></button><a href="excess-ranking/index.html"><span>2</span><strong>Historical excess</strong><p>Find the strongest run versus buy and hold.</p></a><button type="button" data-preset="annualized"><span>3</span><strong>Annualized return</strong><p>Compare long-run strategy compounding.</p></button><button type="button" data-preset="latest"><span>4</span><strong>Chart gallery</strong><p>Open a fund to inspect all three charts.</p></button><button type="button" data-preset="buyHold"><span>5</span><strong>Buy &amp; hold horizons</strong><p>Contrast the strategy with passive exposure.</p></button></section>
 <section class="ranking-panel" id="ranking" aria-labelledby="ranking-title"><div class="ranking-toolbar"><div><span class="eyebrow dark">LATEST REPLAY</span><h2 id="ranking-title">Backtest rankings</h2></div><label class="search"><span class="sr-only">Search fund name or code</span><input type="search" data-search placeholder="Search name or code"></label></div>
 <div class="sortbar"><span class="sort-label">SORT FUNDS</span><div class="sort-pills"><button class="selected" type="button" data-sort="latest">Latest strategy</button><button type="button" data-sort="annualized">Strategy ann.</button><button type="button" data-sort="buyHold">B&amp;H ann.</button><button type="button" data-sort="excess">Excess</button><button type="button" data-sort="drawdown">Drawdown</button></div><div class="sort-actions"><button class="direction" type="button" data-direction>Highest first ↓</button><details class="columns"><summary>Columns (<span data-column-count>7</span>)</summary><div>{checks}</div></details></div></div>
 <p class="table-note"><span><span data-result-count>{len(funds)}</span> funds · {buys} buy signals · <b>W</b> marks the stronger annualized result</span><span>All data through <strong>{esc(snapshot['latestObservation'])}</strong></span></p><noscript><p class="noscript-note">Interactive search, sorting, columns and theme require JavaScript; all results and detail links remain available.</p></noscript>
 <div class="table-wrap"><table><thead><tr><th>#</th><th>Fund / signal</th><th>Latest strategy</th><th class="column-annualized">Strategy ann.</th><th class="column-buyHold">B&amp;H ann.</th><th class="column-excess">Excess</th><th class="column-drawdown">Drawdown</th><th class="column-sharpe column-hidden">Sharpe</th><th class="column-trades column-hidden">Trades</th><th aria-label="Open fund detail"></th></tr></thead><tbody>{rows}</tbody></table></div><div class="mobile-results">{cards}</div><p class="empty-results" data-empty-results hidden>No funds match this search.</p></section></main>
 <footer>Generated from {esc(snapshot['sourceSummary'])} · Standalone backtest workspace</footer></div></body></html>"""
+
+
+def excess_source_key(value: float | str) -> str:
+    return value if isinstance(value, str) else f"source-{value:g}"
+
+
+def excess_run_key(value: float | None) -> str:
+    return "all" if value is None else f"run-{value:g}"
+
+
+def render_excess_card(row: dict[str, object], rank: int) -> str:
+    return f"""<article class="excess-card"><div class="excess-card-head"><div><span class="rank-chip">#{rank}</span><strong>{esc(row['code'])}</strong><small>{esc(row['name'])}</small></div><div><span>EXCESS ANNUALIZED</span><b class="{tone(row['excessAnnualized'])}">{pct(row['excessAnnualized'])}</b></div></div>
+<div class="excess-facts"><span>Source years <b>{duration_label(row['sourceYears'])}</b></span><span>Run years <b>{duration_label(row['runYears'])}</b></span><span>Strategy ann. <b>{pct(row['strategyAnnualized'])}</b></span><span>Buy &amp; hold ann. <b>{pct(row['buyHoldAnnualized'])}</b></span><span>Through <b>{esc(row['end'] or 'Unavailable')}</b></span><span>Winning run <b>{esc(row['label'])}</b></span></div>
+<a class="excess-chart" href="{esc(row['chart'])}" target="_blank" rel="noreferrer"><img src="{esc(row['chart'])}" alt="{esc(row['name'])} historical excess backtest chart"><span>Open chart ↗</span></a></article>"""
+
+
+def excess_ranking_views(rows: list[dict[str, object]]) -> tuple[list[float | str], list[float], dict[tuple[str, str], list[dict[str, object]]]]:
+    source_values = sorted({row["sourceYears"] for row in rows if row["sourceYears"] is not None}, reverse=True)
+    run_values = sorted({row["runYears"] for row in rows if row["runYears"] is not None})
+    source_groups: list[float | str] = ["mixed", *source_values]
+    if any(row["sourceYears"] is None for row in rows):
+        source_groups.append("other")
+    selections: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for source_group in source_groups:
+        for run_years in [None, *run_values]:
+            winners = best_excess_runs(rows, source_group, run_years)
+            selections[(excess_source_key(source_group), excess_run_key(run_years))] = winners
+    return source_groups, run_values, selections
+
+
+def render_excess_ranking(rows: list[dict[str, object]], history_path: Path) -> str:
+    source_groups, run_values, selections = excess_ranking_views(rows)
+    views: list[str] = []
+    for (source_key, run_key), winners in selections.items():
+            cards = "".join(render_excess_card(row, index) for index, row in enumerate(winners, start=1))
+            hidden = "" if source_key == "mixed" and run_key == "all" else " hidden"
+            content = cards or '<p class="empty-results">No eligible chart-backed runs match this grouping.</p>'
+            views.append(f'<section class="excess-grid" data-excess-view data-source="{source_key}" data-run="{run_key}"{hidden}>{content}</section>')
+    source_tabs = "".join(
+        f'<button role="tab" type="button" data-excess-source="{excess_source_key(group)}" aria-selected="{str(group == "mixed").lower()}">{"Mixed" if group == "mixed" else "Other" if group == "other" else duration_label(group)}</button>'
+        for group in source_groups
+    )
+    run_tabs = "".join(
+        f'<button role="tab" type="button" data-excess-run="{excess_run_key(value)}" aria-selected="{str(value is None).lower()}">{"All run years" if value is None else duration_label(value)}</button>'
+        for value in [None, *run_values]
+    )
+    written = datetime.fromtimestamp(history_path.stat().st_mtime).astimezone().strftime("%d %b %Y %H:%M")
+    page = page_head("Excess Ranking · Backtest Intelligence", "../", "Historical excess annualized backtest rankings with chart evidence.") + f"""<body><div class="site-shell excess-page" data-excess-dashboard>
+<header class="topbar">{brand('../index.html')}<div class="top-actions"><span class="fresh"><i></i>History refreshed {written}</span>{theme_button()}</div></header>
+<main class="excess-shell"><a class="back-link" href="../index.html">← Master dashboard</a><section class="excess-heading"><span class="eyebrow dark">HISTORICAL RUN EVIDENCE</span><h1>Excess Ranking</h1><p>Best strategy excess over buy and hold, grouped by source-data horizon and scored run duration.</p><small>Source <b>{esc(history_path.name)}</b> · {len(rows)} eligible completed runs with chart evidence.</small></section>
+<section class="excess-controls"><div><p>Choose the source-data CSV horizon.</p><div class="excess-tabs" role="tablist" aria-label="Source data horizon" data-tab-group>{source_tabs}</div></div><div><p>Run years = source years − lookback years.</p><div class="excess-tabs" role="tablist" aria-label="Run duration" data-tab-group>{run_tabs}</div></div></section>
+<p class="excess-note">Each view ranks the strongest eligible historical run per fund. Runs without a usable technical chart are excluded.</p>{''.join(views)}</main><footer>Historical evidence from {esc(history_path.name)} · Past simulated results do not predict future performance.</footer></div></body></html>"""
+    return page
 
 
 def metric_card(label: str, metrics: dict[str, object], historical: bool = False) -> str:
@@ -310,7 +443,13 @@ def render_detail(fund: dict[str, object]) -> str:
 <footer>{esc(fund['code'])} · Data through {esc(fund['latestEnd'] or 'unavailable')} · Past simulated results do not predict future performance.</footer></div></body></html>"""
 
 
-def build_site(snapshot: dict[str, object], site: Path = SITE, source: Path = SOURCE) -> None:
+def build_site(
+    snapshot: dict[str, object],
+    history: list[dict[str, str]] | None = None,
+    history_path: Path | None = None,
+    site: Path = SITE,
+    source: Path = SOURCE,
+) -> None:
     project = site.parent.resolve()
     staging = project / ".site-build"
     if staging.exists():
@@ -334,11 +473,28 @@ def build_site(snapshot: dict[str, object], site: Path = SITE, source: Path = SO
                 generated[key] = None
         fund["charts"] = generated
 
+    excess_rows = excess_history_rows(history or [])
+    if history_path is not None:
+        _, _, excess_views = excess_ranking_views(excess_rows)
+        unique_runs = {row["id"]: row for winners in excess_views.values() for row in winners}
+        excess_charts_dir = assets / "excess-charts"
+        excess_charts_dir.mkdir(parents=True, exist_ok=True)
+        for row in unique_runs.values():
+            source_chart = row["chartPath"]
+            safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", row["id"]).strip("-") or row["code"].lower()
+            destination = excess_charts_dir / f"{row['code'].lower()}-{safe_id}{source_chart.suffix.lower()}"
+            shutil.copy2(source_chart, destination)
+            row["chart"] = f"../assets/excess-charts/{destination.name}"
+
     (staging / "index.html").write_text(render_master(snapshot), encoding="utf-8")
     for fund in snapshot["funds"]:
         fund_dir = staging / "funds" / fund["slug"]
         fund_dir.mkdir(parents=True)
         (fund_dir / "index.html").write_text(render_detail(fund), encoding="utf-8")
+    if history_path is not None:
+        excess_dir = staging / "excess-ranking"
+        excess_dir.mkdir()
+        (excess_dir / "index.html").write_text(render_excess_ranking(excess_rows, history_path), encoding="utf-8")
 
     if site.exists():
         shutil.rmtree(site)
@@ -347,8 +503,10 @@ def build_site(snapshot: dict[str, object], site: Path = SITE, source: Path = SO
 
 def main() -> None:
     summary_path, rows = latest_successful_summary(TUNINGS.glob("final_backtest_summary_*.csv"))
-    snapshot = build_snapshot(summary_path, rows, read_csv(TUNINGS / "backtest_run_history.csv"))
-    build_site(snapshot)
+    history_path = TUNINGS / "backtest_run_history.csv"
+    history = read_csv(history_path)
+    snapshot = build_snapshot(summary_path, rows, history)
+    build_site(snapshot, history, history_path)
     print(f"Generated {len(snapshot['funds'])} fund pages from {summary_path.name}")
     print(f"Open locally: {(SITE / 'index.html').resolve()}")
 

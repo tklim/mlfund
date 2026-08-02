@@ -24,6 +24,7 @@ class References(HTMLParser):
 class StaticBacktestDashboardTests(unittest.TestCase):
     def test_expected_pages_and_assets_are_generated(self):
         self.assertTrue((SITE / "index.html").is_file())
+        self.assertTrue((SITE / "excess-ranking" / "index.html").is_file())
         actual = {path.parent.name for path in (SITE / "funds").glob("*/index.html")}
         self.assertEqual(actual, EXPECTED_FUNDS)
         for asset in ("styles.css", "dashboard.js", "og.png"):
@@ -45,6 +46,20 @@ class StaticBacktestDashboardTests(unittest.TestCase):
                 target = (page.parent / reference.split("#", 1)[0]).resolve()
                 self.assertTrue(target.exists(), (page, reference))
 
+    def test_excess_ranking_has_group_controls_and_chart_assets(self):
+        page = (SITE / "excess-ranking" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Excess Ranking", page)
+        self.assertIn('href="../index.html"', page)
+        self.assertIn('data-excess-source="mixed"', page)
+        self.assertIn('data-excess-run="all"', page)
+        self.assertIn("data-excess-view", page)
+        self.assertIn("excess-charts", page)
+        self.assertTrue(any((SITE / "assets" / "excess-charts").glob("*.png")))
+
+    def test_master_historical_excess_links_to_static_ranking_page(self):
+        master = (SITE / "index.html").read_text(encoding="utf-8")
+        self.assertIn('href="excess-ranking/index.html"', master)
+
     def test_site_is_decoupled_from_server_and_live_dashboard(self):
         text = "\n".join(path.read_text(encoding="utf-8") for path in SITE.rglob("*.html"))
         for forbidden in ("Cloudflare", "vinext", "Fund Signal", "worker.js", "C:\\Users\\"):
@@ -59,7 +74,10 @@ class StaticBacktestDashboardTests(unittest.TestCase):
             self.assertIn(marker, master)
         for marker in ("localStorage", "data-chart-tab", "scrollIntoView", "column-hidden"):
             self.assertIn(marker, script)
+        for marker in ("data-excess-dashboard", "data-excess-source", "data-tab-group"):
+            self.assertIn(marker, script)
         self.assertIn("@media(max-width:760px)", styles)
+        self.assertIn("grid-template-columns:repeat(4", styles)
 
     def test_detail_pages_link_back_and_offer_three_chart_tabs(self):
         for page in (SITE / "funds").glob("*/index.html"):
