@@ -160,6 +160,24 @@
     updateExcess();
   }
 
+  const buyhold = document.querySelector("[data-buyhold-dashboard]");
+  if (buyhold) {
+    const tabs = Array.from(buyhold.querySelectorAll("[data-buyhold-source]"));
+    const views = Array.from(buyhold.querySelectorAll("[data-buyhold-view]"));
+    let source = "mixed";
+    function updateBuyhold() {
+      tabs.forEach(function (tab) {
+        const selected = tab.dataset.buyholdSource === source;
+        tab.setAttribute("aria-selected", String(selected));
+      });
+      views.forEach(function (view) { view.hidden = view.dataset.source !== source; });
+    }
+    tabs.forEach(function (tab) {
+      tab.addEventListener("click", function () { source = tab.dataset.buyholdSource; updateBuyhold(); });
+    });
+    updateBuyhold();
+  }
+
   const chartPanel = document.querySelector("[data-chart-panel]");
   if (chartPanel) {
     const tabs = Array.from(chartPanel.querySelectorAll("[data-chart-tab]"));

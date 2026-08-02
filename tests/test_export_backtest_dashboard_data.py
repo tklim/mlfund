@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from scripts import export_backtest_dashboard_data as exporter
+from scripts import generate_buyhold_dashboard_charts as buyhold_charts
 
 
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -104,6 +105,39 @@ class BacktestDashboardExporterTests(unittest.TestCase):
         five_year = exporter.best_excess_runs(rows, 5.0, 3.0)
         self.assertEqual([row["code"] for row in mixed], ["MAPF", "MAKGCF"])
         self.assertEqual(five_year[0]["id"], "new")
+
+    def test_buyhold_candidates_normalize_aliases_and_select_deterministically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "MAUS_RMH_USEquityRMH_nav_5Y.csv"
+            data.write_text("Date,TotalReturn\n2022-01-01,1\n2025-01-01,2\n", encoding="utf-8")
+            base = {
+                "run_status": "completed", "data_file": str(data), "backtest_start": "2022-01-01", "backtest_end": "2025-01-01",
+                "buy_hold_annualized_return_pct": "8", "lookback_years": "1", "run_started_at": "2026-08-01",
+            }
+            rows = [
+                {**base, "fund_label": "MAUSRMHUSEquityRMHnav5Y", "run_id": "old"},
+                {**base, "fund_label": "MAUS_RMH_USEquityRMH", "run_id": "new", "run_started_at": "2026-08-02"},
+            ]
+            eligible = exporter.buyhold_history_rows(rows, data_root=root)
+        self.assertEqual(len(eligible), 2)
+        self.assertEqual(eligible[0]["code"], "MAUS")
+        self.assertEqual(eligible[0]["sourceYears"], 5.0)
+        self.assertEqual(eligible[0]["scoredYears"], 4.0)
+        self.assertEqual(exporter.best_buyhold_runs(eligible)[0]["id"], "new")
+
+    def test_low_resolution_buyhold_chart_uses_scored_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "prices.csv"
+            data.write_text("Date,TotalReturn\n2020-01-01,10\n2021-01-01,12\n2022-01-01,15\n", encoding="utf-8")
+            output = root / "chart.png"
+            created = buyhold_charts.generate_buyhold_chart(data, "2021-01-01", "2022-01-01", output)
+            series = buyhold_charts.buyhold_window(data, "2021-01-01", "2022-01-01")
+            self.assertTrue(created)
+            self.assertTrue(output.is_file())
+            self.assertEqual(len(series[0]), 2)
+            self.assertEqual(round(series[1].iloc[-1], 2), 12500.0)
 
 
 if __name__ == "__main__":

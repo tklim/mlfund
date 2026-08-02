@@ -25,6 +25,7 @@ class StaticBacktestDashboardTests(unittest.TestCase):
     def test_expected_pages_and_assets_are_generated(self):
         self.assertTrue((SITE / "index.html").is_file())
         self.assertTrue((SITE / "excess-ranking" / "index.html").is_file())
+        self.assertTrue((SITE / "buyhold-ranking" / "index.html").is_file())
         actual = {path.parent.name for path in (SITE / "funds").glob("*/index.html")}
         self.assertEqual(actual, EXPECTED_FUNDS)
         for asset in ("styles.css", "dashboard.js", "og.png"):
@@ -60,6 +61,19 @@ class StaticBacktestDashboardTests(unittest.TestCase):
         master = (SITE / "index.html").read_text(encoding="utf-8")
         self.assertIn('href="excess-ranking/index.html"', master)
 
+    def test_buyhold_ranking_has_horizon_controls_and_compact_chart_assets(self):
+        page = (SITE / "buyhold-ranking" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Buy &amp; Hold Ranking", page)
+        self.assertIn('href="../index.html"', page)
+        self.assertIn('data-buyhold-source="mixed"', page)
+        self.assertIn("data-buyhold-view", page)
+        self.assertIn("buyhold-charts", page)
+        self.assertTrue(any((SITE / "assets" / "buyhold-charts").glob("*.png")))
+
+    def test_master_buyhold_horizons_links_to_static_ranking_page(self):
+        master = (SITE / "index.html").read_text(encoding="utf-8")
+        self.assertIn('href="buyhold-ranking/index.html"', master)
+
     def test_site_is_decoupled_from_server_and_live_dashboard(self):
         text = "\n".join(path.read_text(encoding="utf-8") for path in SITE.rglob("*.html"))
         for forbidden in ("Cloudflare", "vinext", "Fund Signal", "worker.js", "C:\\Users\\"):
@@ -76,8 +90,10 @@ class StaticBacktestDashboardTests(unittest.TestCase):
             self.assertIn(marker, script)
         for marker in ("data-excess-dashboard", "data-excess-source", "data-tab-group"):
             self.assertIn(marker, script)
+        self.assertIn("data-buyhold-dashboard", script)
         self.assertIn("@media(max-width:760px)", styles)
         self.assertIn("grid-template-columns:repeat(4", styles)
+        self.assertIn(".buyhold-grid", styles)
 
     def test_detail_pages_link_back_and_offer_three_chart_tabs(self):
         for page in (SITE / "funds").glob("*/index.html"):
