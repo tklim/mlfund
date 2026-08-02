@@ -227,6 +227,54 @@ def buyhold_ranking_views(rows: list[dict[str, object]]) -> tuple[list[float | s
     return source_groups, {excess_source_key(group): best_buyhold_runs(rows, group) for group in source_groups}
 
 
+def annualized_history_rows(rows: Iterable[dict[str, str]]) -> list[dict[str, object]]:
+    eligible: list[dict[str, object]] = []
+    for row in rows:
+        label = normalized_history_label(row.get("fund_label", ""))
+        strategy = number(row, "adaptive_annualized_return_pct", 8)
+        buyhold = number(row, "buy_hold_annualized_return_pct", 8)
+        source = source_years(row)
+        chart_path = Path(row["chart_file"]) if row.get("chart_file") else None
+        if (
+            label not in FUND_NAMES
+            or row.get("run_status", "").lower() != "completed"
+            or (strategy is None and buyhold is None)
+            or source is None
+            or chart_path is None
+            or not chart_path.is_file()
+        ):
+            continue
+        score = max(value for value in (strategy, buyhold) if value is not None)
+        winner = "Strategy annualized" if strategy is not None and (buyhold is None or strategy >= buyhold) else "Buy & hold annualized"
+        code, name = FUND_NAMES[label]
+        lookback = number(row, "lookback_years", 2)
+        eligible.append({
+            "id": row.get("run_id", ""), "fund": label, "code": code, "name": name,
+            "sourceYears": source, "scoredYears": round(source - lookback, 2) if lookback is not None else None,
+            "end": row.get("backtest_end") or row.get("data_end") or None, "started": row.get("run_started_at", ""),
+            "chartPath": chart_path, "strategyAnnualized": strategy, "buyHoldAnnualized": buyhold,
+            "score": score, "winner": winner, "label": history_run_label(row),
+        })
+    return eligible
+
+
+def best_annualized_runs(rows: Iterable[dict[str, object]], source_group: float | str = "mixed") -> list[dict[str, object]]:
+    winners: dict[str, dict[str, object]] = {}
+    for row in rows:
+        if source_group != "mixed" and row["sourceYears"] != source_group:
+            continue
+        incumbent = winners.get(row["fund"])
+        key = (row["score"], row["started"], row["id"])
+        if incumbent is None or key > (incumbent["score"], incumbent["started"], incumbent["id"]):
+            winners[row["fund"]] = row
+    return sorted(winners.values(), key=lambda row: (-row["score"], row["code"]))
+
+
+def annualized_ranking_views(rows: list[dict[str, object]]) -> tuple[list[float | str], dict[str, list[dict[str, object]]]]:
+    source_groups: list[float | str] = ["mixed", *sorted({row["sourceYears"] for row in rows}, reverse=True)]
+    return source_groups, {excess_source_key(group): best_annualized_runs(rows, group) for group in source_groups}
+
+
 def metric_block(row: dict[str, str] | None, prefix: str = "") -> dict[str, float | None]:
     return {
         "totalReturn": number(row, f"{prefix}adaptive_return_pct"),
@@ -399,7 +447,7 @@ def render_master(snapshot: dict[str, object]) -> str:
 <header class="topbar">{brand('index.html')}<div class="top-actions"><span class="fresh"><i></i>Local snapshot · {date_text(snapshot['latestObservation'])}</span>{theme_button()}</div></header>
 <main class="master-shell"><section class="hero"><span class="eyebrow">BACKTEST INTELLIGENCE HUB</span><h1>Every strategy. One evidence trail.</h1><p>Compare full-history replays, rank adaptive strategies against buy and hold, and open every fund’s technical evidence from one independent workspace.</p><div class="hero-pills"><span>{len(funds)} funds</span><span>Latest local data {esc(snapshot['latestObservation'])}</span><span>Run completed {esc((snapshot['runCompletedAt'] or 'Unavailable')[:16])}</span></div></section>
 <section class="kpi-grid" aria-label="Backtest summary"><article><span>Latest leader</span><strong>{leader['code']} · {pct(leader['latest']['totalReturn'])}</strong></article><article><span>Best historical excess</span><strong>{excess_leader['code']} · {pct(excess_leader['historicalBest']['excessAnnualized'])}</strong></article><article><span>Buy signals</span><strong>{buys} of {len(funds)}</strong></article><article><span>Newest observation</span><strong>{esc(snapshot['latestObservation'])}</strong></article></section>
-<section class="lens-grid" aria-label="Backtest views"><button type="button" data-preset="latest"><span>1</span><strong>Latest results</strong><p>Rank the most recent full-history replay.</p></button><a href="excess-ranking/index.html"><span>2</span><strong>Historical excess</strong><p>Find the strongest run versus buy and hold.</p></a><button type="button" data-preset="annualized"><span>3</span><strong>Annualized return</strong><p>Compare long-run strategy compounding.</p></button><button type="button" data-preset="latest"><span>4</span><strong>Chart gallery</strong><p>Open a fund to inspect all three charts.</p></button><a href="buyhold-ranking/index.html"><span>5</span><strong>Buy &amp; hold horizons</strong><p>Compare passive returns across available source horizons.</p></a></section>
+<section class="lens-grid" aria-label="Backtest views"><button type="button" data-preset="latest"><span>1</span><strong>Latest results</strong><p>Rank the most recent full-history replay.</p></button><a href="excess-ranking/index.html"><span>2</span><strong>Historical excess</strong><p>Find the strongest run versus buy and hold.</p></a><a href="annualized-ranking/index.html"><span>3</span><strong>Annualized return</strong><p>Rank the stronger strategy or passive annualized result.</p></a><button type="button" data-preset="latest"><span>4</span><strong>Chart gallery</strong><p>Open a fund to inspect all three charts.</p></button><a href="buyhold-ranking/index.html"><span>5</span><strong>Buy &amp; hold horizons</strong><p>Compare passive returns across available source horizons.</p></a></section>
 <section class="ranking-panel" id="ranking" aria-labelledby="ranking-title"><div class="ranking-toolbar"><div><span class="eyebrow dark">LATEST REPLAY</span><h2 id="ranking-title">Backtest rankings</h2></div><label class="search"><span class="sr-only">Search fund name or code</span><input type="search" data-search placeholder="Search name or code"></label></div>
 <div class="sortbar"><span class="sort-label">SORT FUNDS</span><div class="sort-pills"><button class="selected" type="button" data-sort="latest">Latest strategy</button><button type="button" data-sort="annualized">Strategy ann.</button><button type="button" data-sort="buyHold">B&amp;H ann.</button><button type="button" data-sort="excess">Excess</button><button type="button" data-sort="drawdown">Drawdown</button></div><div class="sort-actions"><button class="direction" type="button" data-direction>Highest first ↓</button><details class="columns"><summary>Columns (<span data-column-count>7</span>)</summary><div>{checks}</div></details></div></div>
 <p class="table-note"><span><span data-result-count>{len(funds)}</span> funds · {buys} buy signals · <b>W</b> marks the stronger annualized result</span><span>All data through <strong>{esc(snapshot['latestObservation'])}</strong></span></p><noscript><p class="noscript-note">Interactive search, sorting, columns and theme require JavaScript; all results and detail links remain available.</p></noscript>
@@ -486,6 +534,32 @@ def render_buyhold_ranking(rows: list[dict[str, object]], history_path: Path) ->
 <p class="excess-note">Each view selects the strongest local buy-and-hold annualized result per fund. Charts use the run’s scored date range and a $10,000 normalized investment.</p>{''.join(cards)}</main><footer>Historical passive-return evidence from {esc(history_path.name)} · Past results do not predict future performance.</footer></div></body></html>"""
 
 
+def render_annualized_card(row: dict[str, object], rank: int) -> str:
+    return f"""<article class="excess-card annualized-card"><div class="excess-card-head"><div><span class="rank-chip">#{rank}</span><strong>{esc(row['code'])}</strong><small>{esc(row['name'])}</small></div><div><span>{esc(row['winner']).upper()}</span><b class="{tone(row['score'])}">{pct(row['score'])}</b></div></div>
+<div class="excess-facts"><span>Source years <b>{duration_label(row['sourceYears'])}</b></span><span>Scored years <b>{duration_label(row['scoredYears'])}</b></span><span>Strategy ann. <b>{pct(row['strategyAnnualized'])}</b></span><span>Buy &amp; hold ann. <b>{pct(row['buyHoldAnnualized'])}</b></span><span>Through <b>{esc(row['end'] or 'Unavailable')}</b></span><span>Winning run <b>{esc(row['label'])}</b></span></div>
+<a class="excess-chart" href="{esc(row['chart'])}" target="_blank" rel="noreferrer"><img src="{esc(row['chart'])}" alt="{esc(row['name'])} top annualized historical backtest chart"><span>Open chart ↗</span></a></article>"""
+
+
+def render_annualized_ranking(rows: list[dict[str, object]], history_path: Path) -> str:
+    source_groups, views = annualized_ranking_views(rows)
+    source_tabs = "".join(
+        f'<button role="tab" type="button" data-annualized-source="{excess_source_key(group)}" aria-selected="{str(group == "mixed").lower()}">{"Mixed highest" if group == "mixed" else duration_label(group)}</button>'
+        for group in source_groups
+    )
+    cards = []
+    for source_key, winners in views.items():
+        hidden = "" if source_key == "mixed" else " hidden"
+        content = "".join(render_annualized_card(row, index) for index, row in enumerate(winners, start=1))
+        content = content or '<p class="empty-results">No eligible chart-backed annualized results match this horizon.</p>'
+        cards.append(f'<section class="excess-grid" data-annualized-view data-source="{source_key}"{hidden}>{content}</section>')
+    written = datetime.fromtimestamp(history_path.stat().st_mtime).astimezone().strftime("%d %b %Y %H:%M")
+    return page_head("Top Annualized Return · Backtest Intelligence", "../", "Historical strategy and buy-and-hold annualized return rankings.") + f"""<body><div class="site-shell annualized-page" data-annualized-dashboard>
+<header class="topbar">{brand('../index.html')}<div class="top-actions"><span class="fresh"><i></i>History refreshed {written}</span>{theme_button()}</div></header>
+<main class="excess-shell"><a class="back-link" href="../index.html">← Master dashboard</a><section class="excess-heading"><span class="eyebrow dark">HISTORICAL COMPOUNDING</span><h1>Top Annualized Return</h1><p>Highest historical annualized result, whether from strategy or buy and hold, grouped by source-data horizon.</p><small>Source <b>{esc(history_path.name)}</b> · {len(rows)} eligible completed runs with chart evidence.</small></section>
+<section class="excess-controls buyhold-controls"><div><p>Choose the source-data CSV horizon.</p><div class="excess-tabs" role="tablist" aria-label="Annualized return source horizon" data-tab-group>{source_tabs}</div></div></section>
+<p class="excess-note">Each view selects the strongest annualized result per fund. Strategy wins exact ties; runs without a usable technical chart are excluded.</p>{''.join(cards)}</main><footer>Historical compounding evidence from {esc(history_path.name)} · Past simulated results do not predict future performance.</footer></div></body></html>"""
+
+
 def metric_card(label: str, metrics: dict[str, object], historical: bool = False) -> str:
     note = "<p>Best valid completed historical run</p>" if historical else ""
     return f"""<article class="metric-card"><span>{label}</span><strong class="{tone(metrics['annualized'])}">{pct(metrics['annualized'])}</strong><small>Annualized strategy</small><dl><div><dt>Total return</dt><dd>{pct(metrics['totalReturn'])}</dd></div><div><dt>Buy &amp; hold ann.</dt><dd>{pct(metrics['buyHoldAnnualized'])}</dd></div><div><dt>Excess ann.</dt><dd class="{tone(metrics['excessAnnualized'])}">{pct(metrics['excessAnnualized'])}</dd></div><div><dt>Sharpe</dt><dd>{num(metrics['sharpe'])}</dd></div></dl>{note}</article>"""
@@ -554,6 +628,7 @@ def build_site(
 
     excess_rows = excess_history_rows(history or [])
     buyhold_rows = buyhold_history_rows(history or [])
+    annualized_rows = annualized_history_rows(history or [])
     if history_path is not None:
         _, _, excess_views = excess_ranking_views(excess_rows)
         unique_runs = {row["id"]: row for winners in excess_views.values() for row in winners}
@@ -565,6 +640,17 @@ def build_site(
             destination = excess_charts_dir / f"{row['code'].lower()}-{safe_id}{source_chart.suffix.lower()}"
             shutil.copy2(source_chart, destination)
             row["chart"] = f"../assets/excess-charts/{destination.name}"
+
+        _, annualized_views = annualized_ranking_views(annualized_rows)
+        annualized_runs = {row["id"]: row for winners in annualized_views.values() for row in winners}
+        annualized_charts_dir = assets / "annualized-charts"
+        annualized_charts_dir.mkdir(parents=True, exist_ok=True)
+        for row in annualized_runs.values():
+            source_chart = row["chartPath"]
+            safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", row["id"]).strip("-") or row["code"].lower()
+            destination = annualized_charts_dir / f"{row['code'].lower()}-{safe_id}{source_chart.suffix.lower()}"
+            shutil.copy2(source_chart, destination)
+            row["chart"] = f"../assets/annualized-charts/{destination.name}"
 
         buyhold_charts_dir = assets / "buyhold-charts"
         buyhold_charts_dir.mkdir(parents=True, exist_ok=True)
@@ -595,6 +681,9 @@ def build_site(
         buyhold_dir = staging / "buyhold-ranking"
         buyhold_dir.mkdir()
         (buyhold_dir / "index.html").write_text(render_buyhold_ranking(buyhold_rows, history_path), encoding="utf-8")
+        annualized_dir = staging / "annualized-ranking"
+        annualized_dir.mkdir()
+        (annualized_dir / "index.html").write_text(render_annualized_ranking(annualized_rows, history_path), encoding="utf-8")
 
     if site.exists():
         shutil.rmtree(site)

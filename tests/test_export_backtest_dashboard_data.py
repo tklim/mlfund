@@ -139,6 +139,27 @@ class BacktestDashboardExporterTests(unittest.TestCase):
             self.assertEqual(len(series[0]), 2)
             self.assertEqual(round(series[1].iloc[-1], 2), 12500.0)
 
+    def test_annualized_candidates_choose_stronger_metric_and_strategy_tie(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chart = root / "history.png"
+            chart.write_bytes(b"chart")
+            base = {
+                "run_status": "completed", "data_file": "MAKGCF_GreaterChina_nav_5Y.csv", "chart_file": str(chart),
+                "lookback_years": "1", "backtest_end": "2026-07-31", "run_started_at": "2026-08-01",
+            }
+            rows = [
+                {**base, "fund_label": "MAKGCF_GreaterChina", "run_id": "strategy", "adaptive_annualized_return_pct": "9", "buy_hold_annualized_return_pct": "4"},
+                {**base, "fund_label": "MAPF_Progress", "run_id": "buyhold", "adaptive_annualized_return_pct": "3", "buy_hold_annualized_return_pct": "10"},
+                {**base, "fund_label": "HWFL_HWFlexi", "run_id": "tie", "adaptive_annualized_return_pct": "7", "buy_hold_annualized_return_pct": "7"},
+                {**base, "fund_label": "APCR_AsiaPacificREIT", "run_id": "missing", "adaptive_annualized_return_pct": "", "buy_hold_annualized_return_pct": "", "chart_file": str(root / "missing.png")},
+            ]
+            eligible = exporter.annualized_history_rows(rows)
+        ranked = exporter.best_annualized_runs(eligible)
+        self.assertEqual([row["code"] for row in ranked], ["MAPF", "MAKGCF", "HWFL"])
+        self.assertEqual(eligible[1]["winner"], "Buy & hold annualized")
+        self.assertEqual(eligible[2]["winner"], "Strategy annualized")
+
 
 if __name__ == "__main__":
     unittest.main()
