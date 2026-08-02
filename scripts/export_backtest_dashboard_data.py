@@ -211,36 +211,51 @@ def buyhold_history_rows(rows: Iterable[dict[str, str]], data_root: Path = ROOT 
     return eligible
 
 
-def supplement_buyhold_run_years(rows: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Create missing 5Y/4Y/3Y passive windows directly from eligible source CSVs."""
-    supplemented = list(rows)
+def latest_buyhold_run_years(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Build canonical 5Y/4Y/3Y passive windows from the latest usable source date."""
+    generated: list[dict[str, object]] = []
     for fund in sorted({row["fund"] for row in rows}):
         fund_rows = [row for row in rows if row["fund"] == fund]
-        source_rows = sorted(
-            fund_rows,
-            key=lambda row: (row["sourceYears"], row["started"], row["id"]),
-            reverse=True,
-        )
+        unique_sources: dict[Path, dict[str, object]] = {}
+        for row in fund_rows:
+            source = row["dataFile"].resolve()
+            incumbent = unique_sources.get(source)
+            if incumbent is None or (row["started"], row["id"]) > (incumbent["started"], incumbent["id"]):
+                unique_sources[source] = row
+        canonical: tuple[dict[str, object], dict[str, object]] | None = None
+        for longest_years in BUYHOLD_RUN_YEARS:
+            candidates: list[tuple[dict[str, object], dict[str, object]]] = []
+            for source_row in unique_sources.values():
+                if source_row["sourceYears"] < longest_years:
+                    continue
+                metrics = buyhold_period_metrics(source_row["dataFile"], longest_years)
+                if metrics is not None:
+                    candidates.append((source_row, metrics))
+            if candidates:
+                canonical = max(
+                    candidates,
+                    key=lambda candidate: (candidate[1]["end"], candidate[0]["sourceYears"], candidate[0]["started"], candidate[0]["id"]),
+                )
+                break
+        if canonical is None:
+            continue
+        source_row, anchor_metrics = canonical
+        common_end = anchor_metrics["end"]
         for years in BUYHOLD_RUN_YEARS:
-            if any(row["scoredYears"] == years for row in fund_rows):
-                continue
-            source_row = next((row for row in source_rows if row["sourceYears"] >= years), None)
-            if source_row is None:
-                continue
-            metrics = buyhold_period_metrics(source_row["dataFile"], years)
+            metrics = buyhold_period_metrics(source_row["dataFile"], years, end_date=common_end)
             if metrics is None:
                 continue
-            supplemented.append({
+            generated.append({
                 **source_row,
-                "id": f"generated-{source_row['code'].lower()}-{duration_label(years).lower()}",
+                "id": f"latest-{source_row['code'].lower()}-{duration_label(years).lower()}",
                 "scoredYears": years,
                 "start": metrics["start"],
                 "end": metrics["end"],
                 "buyHoldAnnualized": metrics["annualized"],
                 "strategyAnnualized": None,
-                "label": f"Generated {duration_label(years)} passive window",
+                "label": f"Latest {duration_label(years)} passive window",
             })
-    return supplemented
+    return generated
 
 
 def best_buyhold_runs(rows: Iterable[dict[str, object]], run_group: float | str = "mixed") -> list[dict[str, object]]:
@@ -568,7 +583,7 @@ def render_buyhold_ranking(rows: list[dict[str, object]], history_path: Path) ->
 <header class="topbar">{brand('../index.html')}<div class="top-actions"><span class="fresh"><i></i>History refreshed {written}</span>{theme_button()}</div></header>
 <main class="excess-shell"><a class="back-link" href="../index.html">← Master dashboard</a><section class="excess-heading"><span class="eyebrow dark">HISTORICAL PASSIVE RETURNS</span><h1>Buy &amp; Hold Ranking</h1><p>Highest historical buy-and-hold annualized outcome, grouped by scored or generated run duration.</p><small>Source <b>{esc(history_path.name)}</b> · {len(rows)} eligible completed and generated passive windows with local chart data.</small></section>
 <section class="excess-controls buyhold-controls"><div><p>Choose the buy-and-hold scored/run duration.</p><div class="excess-tabs" role="tablist" aria-label="Buy and hold run duration" data-tab-group>{run_tabs}</div></div></section>
-<p class="excess-note">Each view selects the strongest buy-and-hold annualized result per fund. Missing 5Y, 4Y or 3Y scored windows are generated from sufficient source CSV history; charts use a $10,000 normalized investment.</p>{''.join(cards)}</main><footer>Historical passive-return evidence from {esc(history_path.name)} · Past results do not predict future performance.</footer></div></body></html>"""
+<p class="excess-note">Every 5Y, 4Y and 3Y chart is regenerated from the latest usable source date for its fund and uses a $10,000 normalized investment. A horizon is omitted only when the source CSV does not contain enough history.</p>{''.join(cards)}</main><footer>Historical passive-return evidence from {esc(history_path.name)} · Past results do not predict future performance.</footer></div></body></html>"""
 
 
 def render_annualized_card(row: dict[str, object], rank: int) -> str:
@@ -664,7 +679,7 @@ def build_site(
         fund["charts"] = generated
 
     excess_rows = excess_history_rows(history or [])
-    buyhold_rows = supplement_buyhold_run_years(buyhold_history_rows(history or []))
+    buyhold_rows = latest_buyhold_run_years(buyhold_history_rows(history or []))
     annualized_rows = annualized_history_rows(history or [])
     if history_path is not None:
         _, _, excess_views = excess_ranking_views(excess_rows)

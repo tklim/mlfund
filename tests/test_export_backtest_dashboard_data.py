@@ -126,7 +126,7 @@ class BacktestDashboardExporterTests(unittest.TestCase):
         self.assertEqual(eligible[0]["scoredYears"], 4.0)
         self.assertEqual(exporter.best_buyhold_runs(eligible)[0]["id"], "new")
 
-    def test_buyhold_views_group_by_run_years_and_generate_missing_five_year_window(self):
+    def test_buyhold_views_generate_every_horizon_from_latest_source_date(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "MAUS_RMH_USEquityRMH_nav_5Y.csv"
@@ -139,12 +139,37 @@ class BacktestDashboardExporterTests(unittest.TestCase):
                 "buy_hold_annualized_return_pct": "8", "lookback_years": "1", "run_started_at": "2026-08-01",
                 "fund_label": "MAUS_RMH_USEquityRMH", "run_id": "four-year",
             }]
-            eligible = exporter.supplement_buyhold_run_years(exporter.buyhold_history_rows(rows, data_root=root))
+            eligible = exporter.latest_buyhold_run_years(exporter.buyhold_history_rows(rows, data_root=root))
         groups, views = exporter.buyhold_ranking_views(eligible)
         self.assertEqual(groups, ["mixed", 5.0, 4.0, 3.0])
         self.assertEqual(views["run-5"][0]["scoredYears"], 5.0)
-        self.assertTrue(views["run-5"][0]["id"].startswith("generated-"))
-        self.assertEqual(exporter.best_buyhold_runs(eligible, 4.0)[0]["id"], "four-year")
+        self.assertTrue(views["run-5"][0]["id"].startswith("latest-"))
+        self.assertEqual({row["end"] for row in eligible}, {"2024-01-01"})
+
+    def test_buyhold_horizons_use_one_common_end_even_when_shorter_source_is_newer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            long_data = root / "MAUS_RMH_USEquityRMH_nav_5Y.csv"
+            short_data = root / "MAUS_RMH_USEquityRMH_nav_3Y.csv"
+            long_data.write_text(
+                "Date,TotalReturn\n2019-01-01,100\n2020-01-01,110\n2021-01-01,120\n2022-01-01,130\n2023-01-01,140\n2024-01-01,150\n",
+                encoding="utf-8",
+            )
+            short_data.write_text(
+                "Date,TotalReturn\n2022-02-01,100\n2023-02-01,110\n2024-02-01,120\n2025-02-01,130\n",
+                encoding="utf-8",
+            )
+            base = {
+                "run_status": "completed", "backtest_start": "2020-01-01", "backtest_end": "2024-01-01",
+                "buy_hold_annualized_return_pct": "8", "lookback_years": "1", "fund_label": "MAUS_RMH_USEquityRMH",
+            }
+            history = [
+                {**base, "data_file": str(long_data), "run_started_at": "2026-08-01", "run_id": "long"},
+                {**base, "data_file": str(short_data), "run_started_at": "2026-08-02", "run_id": "short"},
+            ]
+            generated = exporter.latest_buyhold_run_years(exporter.buyhold_history_rows(history, data_root=root))
+        self.assertEqual({row["end"] for row in generated}, {"2024-01-01"})
+        self.assertEqual({row["scoredYears"] for row in generated}, {5.0, 4.0, 3.0})
 
     def test_low_resolution_buyhold_chart_uses_scored_window(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -168,6 +193,19 @@ class BacktestDashboardExporterTests(unittest.TestCase):
             self.assertEqual(metrics["start"], "2019-01-01")
             self.assertEqual(metrics["end"], "2024-01-01")
             self.assertGreater(metrics["annualized"], 8.0)
+
+    def test_buyhold_command_line_generates_default_five_four_three_year_charts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "prices.csv"
+            data.write_text(
+                "Date,TotalReturn\n2018-01-01,90\n2019-01-01,100\n2020-01-01,110\n2021-01-01,120\n2022-01-01,130\n2023-01-01,140\n2024-01-01,150\n",
+                encoding="utf-8",
+            )
+            output = root / "charts"
+            result = buyhold_charts.main(["--data-file", str(data), "--output-dir", str(output), "--prefix", "test"])
+            self.assertEqual(result, 0)
+            self.assertEqual({path.name for path in output.glob("*.png")}, {"test-5y.png", "test-4y.png", "test-3y.png"})
 
     def test_annualized_candidates_choose_stronger_metric_and_strategy_tie(self):
         with tempfile.TemporaryDirectory() as directory:

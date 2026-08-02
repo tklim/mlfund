@@ -141,6 +141,17 @@ class StaticBacktestDashboardTests(unittest.TestCase):
         self.assertNotIn("npm", workflow.lower())
         self.assertNotIn("node", workflow.lower())
 
+    def test_local_publish_launcher_is_guarded_and_dashboard_scoped(self):
+        batch = (ROOT / "publish_backtest_dashboard.bat").read_text(encoding="utf-8")
+        publisher = (ROOT / "scripts" / "publish_backtest_dashboard_pages.ps1").read_text(encoding="utf-8")
+        self.assertIn("publish_backtest_dashboard_pages.ps1", batch)
+        self.assertIn("refresh_backtest_dashboard.ps1", publisher)
+        self.assertIn('if ($branch -ne "main")', publisher)
+        self.assertIn("origin/main has", publisher)
+        self.assertIn("git commit --only", publisher)
+        self.assertIn("backtest-dashboard-pages.yml", publisher)
+        self.assertIn("workflow_dispatch", publisher)
+
 
 if __name__ == "__main__":
     unittest.main()
