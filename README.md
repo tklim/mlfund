@@ -183,6 +183,18 @@ In addition to per-fund charts and the timestamped summary CSV, this creates:
 - `outputs/reports/dashboard.pdf`, with one fund per landscape page;
 - a latest-replay GA signal and last-trade date for downstream `CONFIRM` / `CONFLICT` / `NEUTRAL` context.
 
+### Standalone Backtest Intelligence Site
+
+The independent backtest dashboard is a dependency-free static website under `backtest-dashboard/site/`. It does not share code, routes, snapshots, or deployment configuration with the Fund Signal dashboard. Open `backtest-dashboard/site/index.html` directly in a browser; no local server or Node installation is required.
+
+Refresh its generated data and chart assets, then validate the site:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/refresh_backtest_dashboard.ps1
+```
+
+The exporter reads the newest successful `final_backtest_summary_*.csv`, enriches it with the best completed historical run per fund, and regenerates the complete `site/` directory with stable chart assets and one detail page per fund. All navigation and assets use relative paths, so the same directory also works from a GitHub Pages project subpath. The `Publish Backtest Dashboard to GitHub Pages` workflow is manual and does not publish until explicitly run in GitHub Actions.
+
 ### Conditional Forward Probability Dashboard
 
 Generate a decision-support dashboard that compares each fund's latest state with similar historical states, then summarizes forward-return probabilities for BUY / HOLD / SELL review:
