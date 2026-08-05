@@ -126,7 +126,7 @@ class BacktestDashboardExporterTests(unittest.TestCase):
         self.assertEqual(eligible[0]["scoredYears"], 4.0)
         self.assertEqual(exporter.best_buyhold_runs(eligible)[0]["id"], "new")
 
-    def test_buyhold_views_generate_every_horizon_from_latest_source_date(self):
+    def test_buyhold_views_generate_all_supported_windows_with_matching_labels(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "MAUS_RMH_USEquityRMH_nav_5Y.csv"
@@ -141,12 +141,14 @@ class BacktestDashboardExporterTests(unittest.TestCase):
             }]
             eligible = exporter.latest_buyhold_run_years(exporter.buyhold_history_rows(rows, data_root=root))
         groups, views = exporter.buyhold_ranking_views(eligible)
-        self.assertEqual(groups, ["mixed", 5.0, 4.0, 3.0])
+        self.assertEqual(groups, ["mixed", 5.0, 4.0, 3.0, 2.0, 1.0])
         self.assertEqual(views["run-5"][0]["scoredYears"], 5.0)
+        self.assertEqual(views["run-5"][0]["sourceYears"], 5.0)
+        self.assertTrue(all(row["sourceYears"] == row["scoredYears"] for row in eligible))
         self.assertTrue(views["run-5"][0]["id"].startswith("latest-"))
         self.assertEqual({row["end"] for row in eligible}, {"2024-01-01"})
 
-    def test_buyhold_horizons_use_one_common_end_even_when_shorter_source_is_newer(self):
+    def test_buyhold_horizons_prefer_exact_source_before_a_longer_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             long_data = root / "MAUS_RMH_USEquityRMH_nav_5Y.csv"
@@ -168,8 +170,12 @@ class BacktestDashboardExporterTests(unittest.TestCase):
                 {**base, "data_file": str(short_data), "run_started_at": "2026-08-02", "run_id": "short"},
             ]
             generated = exporter.latest_buyhold_run_years(exporter.buyhold_history_rows(history, data_root=root))
-        self.assertEqual({row["end"] for row in generated}, {"2024-01-01"})
-        self.assertEqual({row["scoredYears"] for row in generated}, {5.0, 4.0, 3.0})
+        self.assertEqual({(row["sourceYears"], row["scoredYears"]) for row in generated}, {(5.0, 5.0), (4.0, 4.0), (3.0, 3.0), (2.0, 2.0), (1.0, 1.0)})
+        self.assertEqual({row["end"] for row in generated if row["scoredYears"] == 5.0}, {"2024-01-01"})
+        self.assertEqual({row["end"] for row in generated if row["scoredYears"] == 4.0}, {"2024-01-01"})
+        self.assertEqual({row["end"] for row in generated if row["scoredYears"] == 3.0}, {"2025-02-01"})
+        self.assertEqual({row["end"] for row in generated if row["scoredYears"] == 2.0}, {"2025-02-01"})
+        self.assertEqual({row["end"] for row in generated if row["scoredYears"] == 1.0}, {"2025-02-01"})
 
     def test_low_resolution_buyhold_chart_uses_scored_window(self):
         with tempfile.TemporaryDirectory() as directory:
