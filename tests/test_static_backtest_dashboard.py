@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SITE = ROOT / "backtest-dashboard" / "site"
-EXPECTED_FUNDS = {"apcr", "hwfl", "makgcf", "mapac", "mapf", "maus", "mglvh", "mgprh", "miieh", "mpgfc", "msglr"}
+EXPECTED_FUNDS = {"apcr", "hwfl", "makgcf", "mapac", "mapf", "maus", "mglvh", "mgprh", "miieh", "mpgfc", "msceh", "msglr", "spga"}
 
 
 class References(HTMLParser):
@@ -35,9 +35,9 @@ class StaticBacktestDashboardTests(unittest.TestCase):
     def test_master_contains_one_deterministically_ranked_row_per_fund(self):
         master = (SITE / "index.html").read_text(encoding="utf-8")
         rows = re.findall(r'<tr data-fund-result data-code="([A-Z]+)".*?<td data-rank>#(\d+)</td>', master)
-        self.assertEqual(len(rows), 11)
-        self.assertEqual([int(rank) for _, rank in rows], list(range(1, 12)))
-        self.assertEqual(len({code for code, _ in rows}), 11)
+        self.assertEqual(len(rows), 13)
+        self.assertEqual([int(rank) for _, rank in rows], list(range(1, 14)))
+        self.assertEqual(len({code for code, _ in rows}), 13)
 
     def test_all_html_references_are_relative_and_exist(self):
         for page in SITE.rglob("*.html"):

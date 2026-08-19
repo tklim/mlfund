@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt
 
 
 INITIAL_CAPITAL = 10_000.0
+POSITIVE_COLOR = "#0a715f"
+NEGATIVE_COLOR = "#b24b42"
 DEFAULT_YEARS = (5.0, 4.0, 3.0)
 
 
@@ -101,8 +103,9 @@ def generate_buyhold_chart(data_file: Path, start: str, end: str, output_path: P
     dates, portfolio = series
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure, axis = plt.subplots(figsize=(5.2, 1.9), dpi=80)
-    axis.plot(dates, portfolio, color="#0a715f", linewidth=2.2)
-    axis.fill_between(dates, portfolio, INITIAL_CAPITAL, color="#0a715f", alpha=0.12)
+    color = NEGATIVE_COLOR if portfolio.iloc[-1] < portfolio.iloc[0] else POSITIVE_COLOR
+    axis.plot(dates, portfolio, color=color, linewidth=2.2)
+    axis.fill_between(dates, portfolio, INITIAL_CAPITAL, color=color, alpha=0.12)
     axis.set_axis_off()
     axis.margins(x=0.02, y=0.18)
     figure.tight_layout(pad=0.05)

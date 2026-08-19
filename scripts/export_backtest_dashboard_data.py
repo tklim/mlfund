@@ -29,18 +29,21 @@ FUND_NAMES = {
     "APCR_AsiaPacificREIT": ("APCR", "Asia Pacific REIT"),
     "MGLVH_GlobalLowVolatilityEquityARMHClass": ("MGLVH", "Global Low Volatility"),
     "MIIEH_IndiaEquityRMH": ("MIIEH", "India Equity"),
+    "MSCEH_ShariahChinaEquityARMHClass": ("MSCEH", "Shariah China Equity"),
     "MPGFC_PRSGrowthC": ("MPGFC", "PRS Growth C"),
     "MAPF_Progress": ("MAPF", "Progress"),
     "MAUS_RMH_USEquityRMH": ("MAUS", "US Equity"),
     "MGPRH_GlobalPerspective": ("MGPRH", "Global Perspective"),
+    "SPGA_ShariahPRSGoldenAsiaClassC": ("SPGA", "Shariah PRS Golden Asia"),
     "MSGLR_RM_ShariahGlobalREITMYR": ("MSGLR", "Shariah Global REIT"),
 }
 
 # Earlier history exports embedded the source-file suffix in two fund labels.
-# Preserve their useful run evidence in the configured 11-fund universe.
+# Preserve their useful run evidence in the configured fund universe.
 HISTORY_FUND_ALIASES = {
     "MAUSRMHUSEquityRMHnav5Y": "MAUS_RMH_USEquityRMH",
     "MSGLRRMShariahGlobalREITMYRnav5Y": "MSGLR_RM_ShariahGlobalREITMYR",
+    "MSGLRRMShariahGlobalREITMYRnav3Y": "MSGLR_RM_ShariahGlobalREITMYR",
 }
 
 CHARTS = (
@@ -192,7 +195,6 @@ def buyhold_history_rows(rows: Iterable[dict[str, str]], data_root: Path = ROOT 
         if (
             label not in FUND_NAMES
             or row.get("run_status", "").lower() != "completed"
-            or annualized is None
             or source is None
             or data_file is None
             or not start
@@ -342,11 +344,15 @@ def build_snapshot(summary_path: Path, rows: list[dict[str, str]], history: list
             continue
         code, name = FUND_NAMES[label]
         history_row = historical.get(label)
+        score_years = source_years(row)
+        lookback_years = number(history_row, "lookback_years")
         fund = {
             "id": label,
             "slug": code.lower(),
             "code": code,
             "name": name,
+            "scoreYears": score_years,
+            "runYears": round(score_years - lookback_years, 2) if score_years is not None and lookback_years is not None else None,
             "signal": normalize_signal(row.get("ga_signal")),
             "lastTradeDate": row.get("last_trade_date") or None,
             "latestStart": row.get("latest_data_start") or None,
@@ -455,7 +461,8 @@ def result_attrs(fund: dict[str, object]) -> str:
         f'data-fund-result data-code="{esc(fund["code"])}" data-search="{esc((fund["code"] + " " + fund["name"]).lower())}" '
         f'data-latest="{value_attr(metrics["totalReturn"])}" data-annualized="{value_attr(metrics["annualized"])}" '
         f'data-buy-hold="{value_attr(metrics["buyHoldAnnualized"])}" data-excess="{value_attr(metrics["excessAnnualized"])}" '
-        f'data-drawdown="{value_attr(metrics["maxDrawdown"], True)}"'
+        f'data-drawdown="{value_attr(metrics["maxDrawdown"], True)}" data-sharpe="{value_attr(metrics["sharpe"])}" data-trades="{value_attr(fund["statistics"]["trades"])}" '
+        f'data-score-years="{value_attr(fund["scoreYears"])}" data-run-years="{value_attr(fund["runYears"])}"'
     )
 
 
@@ -464,7 +471,8 @@ def render_table_row(fund: dict[str, object]) -> str:
     href = f'funds/{fund["slug"]}/index.html'
     wins = (m["annualized"] if m["annualized"] is not None else float("-inf")) >= (m["buyHoldAnnualized"] if m["buyHoldAnnualized"] is not None else float("-inf"))
     signal = fund["signal"]
-    return f"""<tr {result_attrs(fund)}><td data-rank>#{fund['rank']}</td><td><a class="fund-identity" href="{href}"><strong>{esc(fund['code'])}</strong><span>{esc(fund['name'])}</span><small class="signal {signal_class(signal)}"><i></i>{esc(signal)}</small></a></td>
+    score_run = f"{duration_label(fund['scoreYears'])} / {duration_label(fund['runYears'])}"
+    return f"""<tr {result_attrs(fund)}><td data-rank>#{fund['rank']}</td><td><a class="fund-identity" href="{href}"><strong>{esc(fund['code'])}</strong><span>{esc(fund['name'])}</span><small class="signal {signal_class(signal)}"><i></i>{esc(signal)}</small></a></td><td class="score-run-years">{score_run}</td>
 <td class="{tone(m['totalReturn'])}"><b>{pct(m['totalReturn'])}</b></td>
 <td class="column-annualized {tone(m['annualized'])}">{pct(m['annualized'])} {'<em>W</em>' if wins else ''}</td>
 <td class="column-buyHold {tone(m['buyHoldAnnualized'])}">{pct(m['buyHoldAnnualized'])} {'<em>W</em>' if not wins else ''}</td>
@@ -496,7 +504,7 @@ def render_master(snapshot: dict[str, object]) -> str:
 <section class="ranking-panel" id="ranking" aria-labelledby="ranking-title"><div class="ranking-toolbar"><div><span class="eyebrow dark">LATEST REPLAY</span><h2 id="ranking-title">Backtest rankings</h2></div><label class="search"><span class="sr-only">Search fund name or code</span><input type="search" data-search placeholder="Search name or code"></label></div>
 <div class="sortbar"><span class="sort-label">SORT FUNDS</span><div class="sort-pills"><button class="selected" type="button" data-sort="latest">Latest strategy</button><button type="button" data-sort="annualized">Strategy ann.</button><button type="button" data-sort="buyHold">B&amp;H ann.</button><button type="button" data-sort="excess">Excess</button><button type="button" data-sort="drawdown">Drawdown</button></div><div class="sort-actions"><button class="direction" type="button" data-direction>Highest first ↓</button><details class="columns"><summary>Columns (<span data-column-count>7</span>)</summary><div>{checks}</div></details></div></div>
 <p class="table-note"><span><span data-result-count>{len(funds)}</span> funds · {buys} buy signals · <b>W</b> marks the stronger annualized result</span><span>All data through <strong>{esc(snapshot['latestObservation'])}</strong></span></p><noscript><p class="noscript-note">Interactive search, sorting, columns and theme require JavaScript; all results and detail links remain available.</p></noscript>
-<div class="table-wrap"><table><thead><tr><th>#</th><th>Fund / signal</th><th>Latest strategy</th><th class="column-annualized">Strategy ann.</th><th class="column-buyHold">B&amp;H ann.</th><th class="column-excess">Excess</th><th class="column-drawdown">Drawdown</th><th class="column-sharpe column-hidden">Sharpe</th><th class="column-trades column-hidden">Trades</th><th aria-label="Open fund detail"></th></tr></thead><tbody>{rows}</tbody></table></div><div class="mobile-results">{cards}</div><p class="empty-results" data-empty-results hidden>No funds match this search.</p></section></main>
+<div class="table-wrap"><table><thead><tr><th>#</th><th>Fund / signal</th><th><button type="button" data-sort="latest">Latest strategy</button></th><th class="column-annualized"><button type="button" data-sort="annualized">Strategy ann.</button></th><th class="column-buyHold"><button type="button" data-sort="buyHold">B&amp;H ann.</button></th><th class="column-excess"><button type="button" data-sort="excess">Excess</button></th><th class="column-drawdown"><button type="button" data-sort="drawdown">Drawdown</button></th><th class="column-sharpe column-hidden"><button type="button" data-sort="sharpe">Sharpe</button></th><th class="column-trades column-hidden"><button type="button" data-sort="trades">Trades</button></th><th aria-label="Open fund detail"></th></tr></thead><tbody>{rows}</tbody></table></div><div class="mobile-results">{cards}</div><p class="empty-results" data-empty-results hidden>No funds match this search.</p></section></main>
 <footer>Generated from {esc(snapshot['sourceSummary'])} · Standalone backtest workspace</footer></div></body></html>"""
 
 
@@ -563,6 +571,18 @@ def render_buyhold_card(row: dict[str, object], rank: int) -> str:
 <a class="buyhold-chart" href="{esc(row['chart'])}" target="_blank" rel="noreferrer"><img src="{esc(row['chart'])}" alt="{esc(row['name'])} buy and hold portfolio chart"><span>{esc(row['start'])}</span><b>{esc(row['end'])}</b></a></article>"""
 
 
+def render_buyhold_table(rows: list[dict[str, object]]) -> str:
+    body = "".join(
+        f'<tr><td>{index}</td><td><strong>{esc(row["code"])}</strong><small>{esc(row["name"])}</small></td>'
+        f'<td class="{tone(row["buyHoldAnnualized"])}">{pct(row["buyHoldAnnualized"])}</td>'
+        f'<td>{duration_label(row["sourceYears"])}</td><td>{duration_label(row["scoredYears"])}</td><td>{esc(row["end"])}</td></tr>'
+        for index, row in enumerate(rows, start=1)
+    )
+    if not body:
+        return '<p class="empty-results">No eligible local buy-and-hold results match this horizon.</p>'
+    return f'<div class="buyhold-table-wrap"><table class="buyhold-table"><thead><tr><th>#</th><th><button type="button" data-buyhold-sort="fund">Fund</button></th><th><button type="button" data-buyhold-sort="annualized">Buy &amp; hold ann.</button></th><th><button type="button" data-buyhold-sort="source">Source years</button></th><th><button type="button" data-buyhold-sort="scored">Scored years</button></th><th><button type="button" data-buyhold-sort="through">Through</button></th></tr></thead><tbody>{body}</tbody></table></div>'
+
+
 def render_buyhold_ranking(rows: list[dict[str, object]], history_path: Path) -> str:
     run_groups, views = buyhold_ranking_views(rows)
     run_tabs = "".join(
@@ -574,7 +594,8 @@ def render_buyhold_ranking(rows: list[dict[str, object]], history_path: Path) ->
         hidden = "" if source_key == "mixed" else " hidden"
         content = "".join(render_buyhold_card(row, index) for index, row in enumerate(winners, start=1))
         content = content or '<p class="empty-results">No eligible local buy-and-hold charts match this horizon.</p>'
-        cards.append(f'<section class="buyhold-grid" data-buyhold-view data-run="{source_key}"{hidden}>{content}</section>')
+        title = "Mixed highest" if source_key == "mixed" else f"{duration_label(winners[0]['scoredYears'])} scored" if winners else "No results"
+        cards.append(f'<section class="buyhold-view" data-buyhold-view data-run="{source_key}"{hidden}><h2 class="buyhold-view-title">{title}</h2>{render_buyhold_table(winners)}<div class="buyhold-grid">{content}</div></section>')
     written = datetime.fromtimestamp(history_path.stat().st_mtime).astimezone().strftime("%d %b %Y %H:%M")
     return page_head("Buy & Hold Ranking · Backtest Intelligence", "../", "Historical buy and hold annualized rankings with compact portfolio charts.") + f"""<body><div class="site-shell buyhold-page" data-buyhold-dashboard>
 <header class="topbar">{brand('../index.html')}<div class="top-actions"><span class="fresh"><i></i>History refreshed {written}</span>{theme_button()}</div></header>

@@ -441,11 +441,14 @@ def plot_technical_chart(
     price_column,
     initial_capital,
     output_path,
+    chart_context_label,
 ):
     short_ema = safe_int(params, "short_ema")
     long_ema = safe_int(params, "long_ema")
     rsi_oversold = safe_int(params, "rsi_oversold", bt.DEFAULT_STRATEGY_PARAMETERS["rsi_oversold"])
     rsi_overbought = safe_int(params, "rsi_overbought", bt.DEFAULT_STRATEGY_PARAMETERS["rsi_overbought"])
+    chart_last_data_date = bt.last_available_data_date(df_result)
+    chart_generated_at = datetime.now()
 
     fig = plt.figure(figsize=(15, 12))
     grid = fig.add_gridspec(3, 1, height_ratios=[1.2, 0.8, 0.8])
@@ -483,7 +486,15 @@ def plot_technical_chart(
                 zorder=5,
             )
 
-    plt.title(f"{fund_label} Final Technical Backtest", fontsize=14, fontweight="bold")
+    bt.set_chart_title(
+        plt.gca(),
+        f"{fund_label} Final Technical Backtest",
+        chart_last_data_date,
+        fontsize=14,
+        fontweight="bold",
+        context_label=chart_context_label,
+        generated_at=chart_generated_at,
+    )
     plt.gca().text(
         0.01,
         0.98,
@@ -503,7 +514,10 @@ def plot_technical_chart(
     plt.plot(x_axis, df_result["RSI"], label="RSI", color="orange")
     plt.axhline(y=rsi_oversold, color="green", linestyle="--", alpha=0.7, label=f"Oversold Guard ({rsi_oversold})")
     plt.axhline(y=rsi_overbought, color="red", linestyle="--", alpha=0.7, label=f"Overbought Guard ({rsi_overbought})")
-    plt.title("RSI Indicator", fontsize=12)
+    bt.set_chart_title(
+        plt.gca(), "RSI Indicator", chart_last_data_date, fontsize=12, context_label=chart_context_label,
+        generated_at=chart_generated_at,
+    )
     plt.ylabel("RSI")
     plt.legend()
     plt.grid(True, alpha=0.3)
@@ -525,7 +539,15 @@ def plot_technical_chart(
         linewidth=2,
         color="blue",
     )
-    plt.title("Portfolio Value Comparison", fontsize=14, fontweight="bold")
+    bt.set_chart_title(
+        plt.gca(),
+        "Portfolio Value Comparison",
+        chart_last_data_date,
+        fontsize=14,
+        fontweight="bold",
+        context_label=chart_context_label,
+        generated_at=chart_generated_at,
+    )
     plt.xlabel("Date")
     plt.ylabel("Portfolio Value")
     plt.legend()
@@ -570,9 +592,10 @@ def last_trade_marker(df_result):
     }
 
 
-def plot_simple_chart(fund_label, df_result, buy_hold_series, buy_hold_return, metrics, initial_capital, output_path):
+def plot_simple_chart(fund_label, df_result, buy_hold_series, buy_hold_return, metrics, initial_capital, output_path, chart_context_label):
     x_axis = df_result["Date"] if "Date" in df_result.columns else df_result.index
     strategy_value = df_result["Portfolio_Value"]
+    chart_last_data_date = bt.last_available_data_date(df_result)
 
     plt.figure(figsize=(13, 7))
     plt.plot(x_axis, strategy_value, label="Best-parameter strategy", color="#1f8f4d", linewidth=3)
@@ -628,7 +651,14 @@ def plot_simple_chart(fund_label, df_result, buy_hold_series, buy_hold_return, m
             color=marker["color"],
             arrowprops={"arrowstyle": "->", "color": marker["color"], "lw": 1},
         )
-    plt.title(f"{fund_label}: Strategy vs Buy and Hold", fontsize=18, fontweight="bold")
+    bt.set_chart_title(
+        plt.gca(),
+        f"{fund_label}: Strategy vs Buy and Hold",
+        chart_last_data_date,
+        fontsize=18,
+        fontweight="bold",
+        context_label=chart_context_label,
+    )
     plt.ylabel("Portfolio Value")
     plt.legend(loc="lower right")
     plt.grid(True, alpha=0.22)
@@ -749,6 +779,12 @@ def run_one_fund(row, args, run_timestamp):
         shutil.copy(original_chart_file, source_chart_copy)
 
     if df_result is not None:
+        chart_context_label = bt.build_chart_context_label(
+            df_full,
+            df_result,
+            safe_float(row, "lookback_years"),
+            safe_int(row, "offset_months"),
+        )
         plot_technical_chart(
             fund_label,
             df_result,
@@ -759,6 +795,7 @@ def run_one_fund(row, args, run_timestamp):
             price_column,
             args.initial_capital,
             technical_chart,
+            chart_context_label,
         )
         plot_simple_chart(
             fund_label,
@@ -768,8 +805,15 @@ def run_one_fund(row, args, run_timestamp):
             metrics,
             args.initial_capital,
             simple_chart,
+            chart_context_label,
         )
         if df_result_latest is not None:
+            latest_chart_context_label = bt.build_chart_context_label(
+                df_full,
+                df_result_latest,
+                safe_float(row, "lookback_years"),
+                safe_int(row, "offset_months"),
+            )
             plot_technical_chart(
                 f"{fund_label} [Latest]",
                 df_result_latest,
@@ -780,6 +824,7 @@ def run_one_fund(row, args, run_timestamp):
                 price_column,
                 args.initial_capital,
                 latest_chart,
+                latest_chart_context_label,
             )
 
     completed_at = datetime.now()

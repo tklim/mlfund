@@ -44,6 +44,21 @@
     let sortKey = "latest";
     let direction = "desc";
 
+    const masterTable = master.querySelector(".table-wrap table");
+    if (masterTable && rows.length) {
+      const header = document.createElement("th");
+      header.textContent = "Score / run years";
+      masterTable.tHead.rows[0].insertBefore(header, masterTable.tHead.rows[0].cells[2]);
+      rows.forEach(function (row) {
+        const cell = document.createElement("td");
+        const score = row.dataset.scoreYears;
+        const run = row.dataset.runYears;
+        cell.className = "score-run-years";
+        cell.textContent = (score ? score + "Y" : "—") + " / " + (run ? run + "Y" : "—");
+        row.insertBefore(cell, row.cells[2]);
+      });
+    }
+
     function numeric(item) {
       const value = Number(item.dataset[sortKey]);
       return Number.isFinite(value) ? value : null;
@@ -174,6 +189,34 @@
     }
     tabs.forEach(function (tab) {
       tab.addEventListener("click", function () { run = tab.dataset.buyholdRun; updateBuyhold(); });
+    });
+    buyhold.querySelectorAll(".buyhold-table").forEach(function (table) {
+      table.querySelectorAll("[data-buyhold-sort]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          const key = button.dataset.buyholdSort;
+          const headers = Array.from(table.querySelectorAll("[data-buyhold-sort]"));
+          const current = table.dataset.sortKey === key ? table.dataset.sortDirection : "desc";
+          const direction = current === "asc" ? "desc" : "asc";
+          table.dataset.sortKey = key;
+          table.dataset.sortDirection = direction;
+          const rows = Array.from(table.tBodies[0].rows);
+          const column = { fund: 1, annualized: 2, source: 3, scored: 4, through: 5 }[key];
+          function value(row) {
+            const text = row.cells[column].textContent.trim();
+            if (key === "fund") return text.replace(/\s+/g, " ").toLowerCase();
+            if (key === "annualized") return parseFloat(text.replace(/[^\d.+-]/g, "")) || 0;
+            if (key === "source" || key === "scored") return parseFloat(text) || 0;
+            return text;
+          }
+          rows.sort(function (left, right) {
+            const a = value(left), b = value(right);
+            const result = a < b ? -1 : a > b ? 1 : 0;
+            return direction === "asc" ? result : -result;
+          });
+          rows.forEach(function (row, index) { row.cells[0].textContent = String(index + 1); table.tBodies[0].appendChild(row); });
+          headers.forEach(function (item) { item.setAttribute("aria-sort", item === button ? direction : "none"); });
+        });
+      });
     });
     updateBuyhold();
   }

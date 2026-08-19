@@ -28,6 +28,75 @@ from common import (
     infer_total_return_method,
 )
 
+
+def last_available_data_date(data):
+    """Return the final valid date in a chart data frame or series index."""
+    if data is None or len(data) == 0:
+        return None
+
+    values = data["Date"] if isinstance(data, pd.DataFrame) and "Date" in data.columns else data.index
+    dates = pd.to_datetime(values, errors="coerce")
+    dates = dates[~pd.isna(dates)]
+    if len(dates) == 0:
+        return None
+    return dates.iloc[-1] if isinstance(dates, pd.Series) else dates[-1]
+
+
+def chart_duration_years(data):
+    """Return the actual elapsed calendar years covered by chart data."""
+    if data is None or len(data) == 0:
+        return None
+
+    values = data["Date"] if isinstance(data, pd.DataFrame) and "Date" in data.columns else data.index
+    dates = pd.to_datetime(values, errors="coerce")
+    dates = dates[~pd.isna(dates)]
+    if len(dates) < 2:
+        return None
+    start = dates.iloc[0] if isinstance(dates, pd.Series) else dates[0]
+    end = dates.iloc[-1] if isinstance(dates, pd.Series) else dates[-1]
+    return (pd.Timestamp(end) - pd.Timestamp(start)).days / 365.25
+
+
+def build_chart_context_label(source_data, run_data, lookback_years_value, offset_months_value):
+    """Format source, tuning, and run horizons for a chart header."""
+    source_years = chart_duration_years(source_data)
+    run_years = chart_duration_years(run_data)
+    if source_years is None or run_years is None:
+        return None
+    return (
+        f"Src{source_years:.1f}Y "
+        f"{float(lookback_years_value):.1f}Y-{int(offset_months_value)}M "
+        f"Run{run_years:.1f}Y"
+    )
+
+
+def set_chart_title(ax, title, last_data_date, *, fontsize, fontweight=None, context_label=None, generated_at=None):
+    """Set a chart title with run context, generation time, and final-data-date labels."""
+    ax.set_title(title, fontsize=fontsize, fontweight=fontweight, pad=18)
+    generated_label = None
+    if generated_at is not None:
+        generated_label = f"Generated {pd.Timestamp(generated_at):%Y-%m-%d %H:%M}"
+    header_parts = [
+        part
+        for part in (
+            context_label,
+            generated_label,
+            f"As of {pd.Timestamp(last_data_date):%Y-%m-%d}" if last_data_date is not None else None,
+        )
+        if part
+    ]
+    if header_parts:
+        ax.text(
+            1.0,
+            1.01,
+            "  ".join(header_parts),
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=max(fontsize - 4, 8),
+            color="#555555",
+        )
+
 try:
     import yfinance as yf
 except ImportError:
@@ -3024,8 +3093,15 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             f"{final_param_text}"
         )
 
-        fig = plt.figure(figsize=(15, 12))
+        fig = plt.figure(figsize=(12, 9))
         grid = fig.add_gridspec(3, 1, height_ratios=[1.2, 0.8, 0.8])
+        chart_last_data_date = last_available_data_date(df_clean)
+        chart_context_label = build_chart_context_label(
+            df_clean,
+            backtest_data,
+            lookback_years,
+            offset_months,
+        )
 
         plt.subplot(grid[0])
         if not adaptive_df.empty and 'NAV' in adaptive_df.columns:
@@ -3053,7 +3129,14 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             x_sell = sell_signals['Date'] if 'Date' in sell_signals.columns else sell_signals.index
             plt.scatter(x_sell, sell_signals['NAV'], color='red', marker='v', s=100, label='Sell Signal', zorder=5)
 
-        plt.title(f'Index-Tuned Adaptive Strategy {csv_name}-{lookback_years}Y-{offset_months}M {strategy_profile} ga10', fontsize=14, fontweight='bold')
+        set_chart_title(
+            plt.gca(),
+            f'Index-Tuned Adaptive Strategy {csv_name}-{lookback_years}Y-{offset_months}M',
+            chart_last_data_date,
+            fontsize=14,
+            fontweight='bold',
+            context_label=chart_context_label,
+        )
         plt.gca().text(
             0.01,
             0.98,
@@ -3080,7 +3163,13 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         else:
             plt.axhline(y=DEFAULT_STRATEGY_PARAMETERS["rsi_oversold"], color='g', linestyle='--', alpha=0.7, label='Oversold Guard')
             plt.axhline(y=DEFAULT_STRATEGY_PARAMETERS["rsi_overbought"], color='r', linestyle='--', alpha=0.7, label='Overbought Guard')
-        plt.title('RSI Indicator (GA-Tuned Entry/Exit Guards)', fontsize=12)
+        set_chart_title(
+            plt.gca(),
+            'RSI Indicator (GA-Tuned Entry/Exit Guards)',
+            chart_last_data_date,
+            fontsize=12,
+            context_label=chart_context_label,
+        )
         plt.ylabel('RSI')
         plt.legend()
         plt.grid(True, alpha=0.3)
@@ -3096,7 +3185,14 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         else:
             log_print("Skipping buy-and-hold chart line because no forward-test dates are available.")
 
-        plt.title('Portfolio Value Comparison', fontsize=14, fontweight='bold')
+        set_chart_title(
+            plt.gca(),
+            'Portfolio Value Comparison',
+            chart_last_data_date,
+            fontsize=14,
+            fontweight='bold',
+            context_label=chart_context_label,
+        )
         plt.xlabel('Date')
         plt.ylabel('Portfolio Value')
         plt.legend()
@@ -3107,7 +3203,12 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
 
         formatted = datetime.now().strftime("%Y%m%d-%H%M%S")
         png_file = CHARTS_DIR / f"{csv_name}-{lookback_years}Y-{offset_months}M-{strategy_profile}-ga10-tuned-{formatted}.png"
-        plt.savefig(png_file, dpi=200, bbox_inches="tight")
+        plt.savefig(
+            png_file,
+            dpi=150,
+            bbox_inches="tight",
+            pil_kwargs={"compress_level": 9, "optimize": True},
+        )
         plt.close()
         log_print(f"\nChart saved to: {png_file}")
 
