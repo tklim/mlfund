@@ -39,6 +39,13 @@ class StaticBacktestDashboardTests(unittest.TestCase):
         self.assertEqual([int(rank) for _, rank in rows], list(range(1, 14)))
         self.assertEqual(len({code for code, _ in rows}), 13)
 
+    def test_master_has_one_clearly_labelled_source_and_run_years_column(self):
+        master = (SITE / "index.html").read_text(encoding="utf-8")
+        script = (SITE / "assets" / "dashboard.js").read_text(encoding="utf-8")
+        self.assertEqual(master.count("Source Year / Run Years"), 1)
+        self.assertNotIn("Score / run years", master)
+        self.assertNotIn("score-run-years", script)
+
     def test_all_html_references_are_relative_and_exist(self):
         for page in SITE.rglob("*.html"):
             parser = References()
@@ -119,7 +126,7 @@ class StaticBacktestDashboardTests(unittest.TestCase):
         styles = (SITE / "assets" / "styles.css").read_text(encoding="utf-8")
         for marker in ("data-search", "data-sort", "data-direction", "data-column", "mobile-results"):
             self.assertIn(marker, master)
-        for marker in ("localStorage", "data-chart-tab", "scrollIntoView", "column-hidden"):
+        for marker in ("localStorage", "data-chart-tab", "scrollIntoView", "column-hidden", "function selectSort", "aria-sort"):
             self.assertIn(marker, script)
         for marker in ("data-excess-dashboard", "data-excess-source", "data-tab-group"):
             self.assertIn(marker, script)

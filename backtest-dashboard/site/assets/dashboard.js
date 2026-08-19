@@ -44,21 +44,6 @@
     let sortKey = "latest";
     let direction = "desc";
 
-    const masterTable = master.querySelector(".table-wrap table");
-    if (masterTable && rows.length) {
-      const header = document.createElement("th");
-      header.textContent = "Score / run years";
-      masterTable.tHead.rows[0].insertBefore(header, masterTable.tHead.rows[0].cells[2]);
-      rows.forEach(function (row) {
-        const cell = document.createElement("td");
-        const score = row.dataset.scoreYears;
-        const run = row.dataset.runYears;
-        cell.className = "score-run-years";
-        cell.textContent = (score ? score + "Y" : "—") + " / " + (run ? run + "Y" : "—");
-        row.insertBefore(cell, row.cells[2]);
-      });
-    }
-
     function numeric(item) {
       const value = Number(item.dataset[sortKey]);
       return Number.isFinite(value) ? value : null;
@@ -95,16 +80,35 @@
       empty.hidden = visible !== 0;
     }
 
+    function updateSortControls() {
+      master.querySelectorAll("[data-sort]").forEach(function (button) {
+        const selected = button.dataset.sort === sortKey;
+        button.classList.toggle("selected", selected);
+        button.setAttribute("aria-pressed", String(selected));
+      });
+      master.querySelectorAll("th [data-sort]").forEach(function (button) {
+        button.setAttribute("aria-sort", button.dataset.sort === sortKey ? (direction === "desc" ? "descending" : "ascending") : "none");
+      });
+      directionButton.textContent = direction === "desc" ? "Highest first ↓" : "Lowest first ↑";
+      directionButton.setAttribute("aria-label", direction === "desc" ? "Sort highest values first; activate for lowest first" : "Sort lowest values first; activate for highest first");
+    }
+
+    function selectSort(nextKey) {
+      direction = nextKey === sortKey ? (direction === "desc" ? "asc" : "desc") : "desc";
+      sortKey = nextKey;
+      updateSortControls();
+      update();
+    }
+
     search.addEventListener("input", update);
     master.querySelectorAll("[data-sort]").forEach(function (button) {
       button.addEventListener("click", function () {
-        sortKey = button.dataset.sort;
-        master.querySelectorAll("[data-sort]").forEach(function (item) { item.classList.toggle("selected", item === button); });
-        update();
+        selectSort(button.dataset.sort);
       });
     });
     directionButton.addEventListener("click", function () {
       direction = direction === "desc" ? "asc" : "desc";
+      updateSortControls();
       directionButton.textContent = direction === "desc" ? "Highest first ↓" : "Lowest first ↑";
       update();
     });
@@ -114,6 +118,7 @@
         direction = "desc";
         directionButton.textContent = "Highest first ↓";
         master.querySelectorAll("[data-sort]").forEach(function (item) { item.classList.toggle("selected", item.dataset.sort === sortKey); });
+        updateSortControls();
         update();
         document.getElementById("ranking").scrollIntoView({ behavior: "smooth", block: "start" });
       });
@@ -127,6 +132,7 @@
         master.querySelector("[data-column-count]").textContent = selected;
       });
     });
+    updateSortControls();
     update();
   }
 
