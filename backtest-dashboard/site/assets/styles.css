@@ -34,3 +34,5 @@
 .buyhold-table th button{padding:0;border:0;background:none;color:inherit;font:inherit;font-size:inherit;letter-spacing:inherit;text-align:inherit;text-transform:inherit;cursor:pointer}.buyhold-table th button:hover,.buyhold-table th button:focus-visible{color:var(--green);text-decoration:underline}
 .ranking-panel th button{padding:0;border:0;background:none;color:inherit;font:inherit;font-size:inherit;letter-spacing:inherit;text-align:inherit;text-transform:inherit;cursor:pointer}.ranking-panel th button:hover,.ranking-panel th button:focus-visible{color:var(--green);text-decoration:underline}
 .score-run-years{color:var(--muted);font-size:11px;white-space:nowrap}
+/* Keep fund names and descriptions readable against both table themes. */
+.fund-identity strong{font-size:15px;font-weight:850;letter-spacing:-.01em}.fund-identity>span{color:var(--ink);font-size:12px;font-weight:600}
