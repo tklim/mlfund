@@ -51,9 +51,17 @@ class StaticBacktestDashboardTests(unittest.TestCase):
             parser = References()
             parser.feed(page.read_text(encoding="utf-8"))
             for reference in parser.references:
+                if reference == "https://fund-signal-dashboard.ltkiat.workers.dev/":
+                    continue
                 self.assertFalse(reference.startswith(("/", "\\", "file:", "http:", "https:")), (page, reference))
                 target = (page.parent / reference.split("#", 1)[0]).resolve()
                 self.assertTrue(target.exists(), (page, reference))
+
+    def test_header_links_to_fund_signal_dashboard_externally(self):
+        master = (SITE / "index.html").read_text(encoding="utf-8")
+        self.assertIn('class="external-dashboard-link"', master)
+        self.assertIn('href="https://fund-signal-dashboard.ltkiat.workers.dev/"', master)
+        self.assertIn('target="_blank" rel="noopener noreferrer"', master)
 
     def test_excess_ranking_has_group_controls_and_chart_assets(self):
         page = (SITE / "excess-ranking" / "index.html").read_text(encoding="utf-8")
@@ -116,7 +124,7 @@ class StaticBacktestDashboardTests(unittest.TestCase):
 
     def test_site_is_decoupled_from_server_and_live_dashboard(self):
         text = "\n".join(path.read_text(encoding="utf-8") for path in SITE.rglob("*.html"))
-        for forbidden in ("Cloudflare", "vinext", "Fund Signal", "worker.js", "C:\\Users\\"):
+        for forbidden in ("Cloudflare", "vinext", "worker.js", "C:\\Users\\"):
             self.assertNotIn(forbidden, text)
         self.assertIsNone(re.search(r'(?:href|src)=["\']/[^/]', text))
 
