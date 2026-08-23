@@ -26,6 +26,8 @@ FUND_NAMES = {
     "MAUS_RMH_USEquityRMH": ("MAUS", "US Equity"),
     "MGPRH_GlobalPerspective": ("MGPRH", "Global Perspective"),
     "MSGLR_RM_ShariahGlobalREITMYR": ("MSGLR", "Shariah Global REIT"),
+    "MSCEH_ShariahChinaEquityARMHClass": ("MSCEH", "Shariah China Equity"),
+    "SPGA_ShariahPRSGoldenAsiaClassC": ("SPGA", "Shariah PRS Golden Asia"),
 }
 
 
