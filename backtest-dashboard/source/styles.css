@@ -34,6 +34,7 @@
 .buyhold-table th button{padding:0;border:0;background:none;color:inherit;font:inherit;font-size:inherit;letter-spacing:inherit;text-align:inherit;text-transform:inherit;cursor:pointer}.buyhold-table th button:hover,.buyhold-table th button:focus-visible{color:var(--green);text-decoration:underline}
 .ranking-panel th button{padding:0;border:0;background:none;color:inherit;font:inherit;font-size:inherit;letter-spacing:inherit;text-align:inherit;text-transform:inherit;cursor:pointer}.ranking-panel th button:hover,.ranking-panel th button:focus-visible{color:var(--green);text-decoration:underline}
 .score-run-years{color:var(--muted);font-size:11px;white-space:nowrap}
+:root[data-theme="dark"] .buyhold-chart img{filter:invert(.88) hue-rotate(180deg)}
 /* Keep fund names and descriptions readable against both table themes. */
 .fund-identity strong{font-size:15px;font-weight:850;letter-spacing:-.01em}.fund-identity>span{color:var(--ink);font-size:12px;font-weight:600}
 .external-dashboard-link{display:inline-flex;align-items:center;min-height:34px;padding:0 11px;border:1px solid var(--green);border-radius:999px;background:var(--mint-soft);color:var(--green);font-size:11px;font-weight:800;white-space:nowrap}.external-dashboard-link:hover,.external-dashboard-link:focus-visible{background:var(--green);color:#fff}

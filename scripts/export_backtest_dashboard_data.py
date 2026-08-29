@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import csv
 import html
+import os
 import re
+import stat
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -21,6 +24,27 @@ TUNINGS = ROOT / "outputs" / "tunings"
 PROJECT = ROOT / "backtest-dashboard"
 SOURCE = PROJECT / "source"
 SITE = PROJECT / "site"
+
+
+def remove_generated_tree(path: Path) -> None:
+    """Remove a previous generated site, handling Windows read-only files."""
+    def onerror(function, target, exc_info):
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            function(target)
+        except OSError:
+            raise exc_info[1]
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            shutil.rmtree(path, onerror=onerror)
+            return
+        except PermissionError as error:
+            last_error = error
+            if attempt < 2:
+                time.sleep(0.5)
+    raise last_error
 
 FUND_NAMES = {
     "MAKGCF_GreaterChina": ("MAKGCF", "Greater China"),
@@ -680,7 +704,7 @@ def build_site(
     project = site.parent.resolve()
     staging = project / ".site-build"
     if staging.exists():
-        shutil.rmtree(staging)
+        remove_generated_tree(staging)
     assets = staging / "assets"
     charts_dir = assets / "charts"
     charts_dir.mkdir(parents=True)
@@ -760,7 +784,7 @@ def build_site(
         (annualized_dir / "index.html").write_text(render_annualized_ranking(annualized_rows, history_path), encoding="utf-8")
 
     if site.exists():
-        shutil.rmtree(site)
+        remove_generated_tree(site)
     shutil.move(str(staging), str(site))
 
 
