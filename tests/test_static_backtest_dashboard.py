@@ -143,6 +143,7 @@ class StaticBacktestDashboardTests(unittest.TestCase):
         self.assertIn("@media(max-width:760px)", styles)
         self.assertIn("grid-template-columns:repeat(4", styles)
         self.assertIn(".buyhold-grid", styles)
+        self.assertIn(':root[data-theme="dark"] .buyhold-chart{background:var(--panel-soft)}', styles)
 
     def test_detail_pages_link_back_and_offer_three_chart_tabs(self):
         for page in (SITE / "funds").glob("*/index.html"):
