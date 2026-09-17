@@ -440,7 +440,7 @@ class OperationalPipelineTests(unittest.TestCase):
         self.assertTrue(pdf_bytes.startswith(b"%PDF"))
         self.assertEqual(len(re.findall(rb"/Type\s*/Page\b", pdf_bytes)), 2)
 
-    def test_excess_leader_selection_ignores_a_zero_fund_leader(self):
+    def test_excess_leader_selection_uses_best_nonzero_run_after_zero_leader(self):
         history = pd.DataFrame(
             [
                 {
@@ -466,7 +466,11 @@ class OperationalPipelineTests(unittest.TestCase):
 
         leaders = final_backtest_from_summary.select_best_run_rows(history, top_funds=0)
 
-        self.assertEqual(leaders["canonical_fund_label"].tolist(), ["POSITIVE"])
+        self.assertEqual(leaders["canonical_fund_label"].tolist(), ["POSITIVE", "ZERO"])
+        self.assertEqual(
+            leaders.loc[leaders["canonical_fund_label"].eq("ZERO"), "source_excess_annualized_return_pct"].item(),
+            -2.0,
+        )
 
     def test_excess_dashboard_ranks_fund_leaders_and_writes_csv(self):
         leaders = pd.DataFrame(

@@ -2450,22 +2450,15 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
 
     log_print("\nGA Hyperparameter Tuning Results:")
     log_print(results_df.to_string(index=False))
-    # Disabled 2026-08-31: do not create per-run snapshots such as
-    # ga_tuning_summary_20260825_190816.csv. The same rows are retained in the
-    # per-fund tuning histories below. To re-enable snapshots, uncomment this
-    # block and the matching log line below.
-    # tune_csv = f"ga_tuning_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    # tune_csv = TUNINGS_DIR / tune_csv
-    # results_df.to_csv(tune_csv, index=False)
-    # Disabled 2026-08-31: do not append to the global
-    # outputs/tunings/backtest_tuning_history.csv file. Uncomment this line to
-    # restore the cumulative global tuning history.
-    # append_csv_rows(TUNING_HISTORY_FILE, results_df.to_dict("records"))
+    tune_csv = f"ga_tuning_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    tune_csv = TUNINGS_DIR / tune_csv
+    results_df.to_csv(tune_csv, index=False)
+    append_csv_rows(TUNING_HISTORY_FILE, results_df.to_dict("records"))
     fund_label = metadata.get("fund_label")
     if fund_label:
         append_fund_history_rows(fund_label, "tuning", results_df.to_dict("records"))
     refresh_top5_parameter_sets()
-    # log_print(f"\nFull results saved to: {tune_csv}")
+    log_print(f"\nFull results saved to: {tune_csv}")
     log_print(f"Best combo (max score {best_score:.3f}): pop={best_combo[0]}, gens={best_combo[1]}, mut={best_combo[2]}, cross={best_combo[3]}")
 
     if return_best_params:

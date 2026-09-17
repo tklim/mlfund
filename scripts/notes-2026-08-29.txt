@@ -1,0 +1,36 @@
+Fetch this page only first: https://36kr.com/information/AI/\nUse web_fetch with a small output limit, for example maxChars: 12000. Do not fetch every article+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++.\nStep 1: Extract only the latest AI articl++++++++++++++++++e headlines, timestamps, summaries/snippets, and article URLs visible on the page.\nStep 2: Remove any articles that match this already-reported list:\n[paste earlier reported headlines or URLs here]\nStep 3: Select only the 5–8 most important remaining articles.\nStep 4: Fetch only those selected article URLs individually, one at a time, with maxChars: 6000 per article.\nStep 5: Produce a bullet-point report. For each item include:\nHeadline\n1–2 sentence summary\nWhy it matters\nURL\nIf the category page times out, do not retry endlessly. Instead, say the category page timed out and try one fallback: web search for site:36kr.com AI 36? today. If individual article fetches fail, still include the headline and URL from the list page and mark the summary as based on the visible snippet only.
+
+
+Fetch this page only first: https://36kr.com/information/AI/ and summarize the latest important AI headlines from today.\nIgnore any stories already included in my earlier report today. If the earlier report is unavailable, state that and proceed with only clearly new items.\nReturn bullet points only. Each bullet should include the headline, brief summary, why it matters, and the article URL.
+
+
+--model "ollama/hf.co/InternScience/Agents-A1-Q8_0-GGUF:Q8_0"
+
+openclaw cron edit ee2f8715-674e-49b2-941f-a2d5ea11a4ce  --model "ollama/hf.co/InternScience/Agents-A1-Q8_0-GGUF:Q8_0"
+
+openclaw cron edit 00604ec2-6b03-42d0-ae06-ccd946e84ba3 --model "ollama/hf.co/InternScience/Agents-A1-Q8_0-GGUF:Q8_0"
+
+openclaw cron edit ee2f8715-674e-49b2-941f-a2d5ea11a4ce  --model "aivie-exch-int/sains-llm-vision"
+openclaw cron edit eff963d6-5587-464a-87b2-647754c490a3 --model "aivie-exch-int/sains-llm-vision"
+
+openclaw 
+
+Recommended implementation order
+Correct the dividend-adjusted index and add fixture-based financial invariant tests.
+Add next-NAV execution, fees, financing costs, and explicit execution assumptions.
+Make configured fund coverage authoritative and fail daily runs on missing/failed funds.
+Strengthen schema, date, duplicate, freshness, and manifest validation.
+Consolidate shared RSI/EMA/annualization logic.
+Add nested walk-forward or untouched holdout evaluation and robustness-based ranking.
+Modularize the backtester and introduce pinned dependencies, Ruff, type checking, and CI.\\\
+
+
+aaatype
+dir
+
+cd email
+type run.bat
+npm install -g omniroute
+
+notepad run.bat
+py -3.12 -m email_organizer.cli scan-once --config config\settings.toml --rules config\rules.toml --limit 500 --verbose

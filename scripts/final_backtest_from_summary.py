@@ -267,11 +267,11 @@ def select_best_run_rows(run_history_df, fund_label=None, top_funds=2):
         ["source_excess_annualized_return_pct", "run_started_at_sort"],
         ascending=[False, False],
     )
-    rank1 = sorted_runs.groupby("canonical_fund_label", sort=False, as_index=False).head(1).reset_index(drop=True)
-    # Exclude the fund only after finding its actual leader. Filtering zero rows
-    # before grouping could incorrectly promote a lower, negative run.
-    leader_values = pd.to_numeric(rank1["source_excess_annualized_return_pct"], errors="coerce")
-    rank1 = rank1[leader_values.notna() & leader_values.ne(0)].reset_index(drop=True)
+    # A zero-excess run is not useful as a displayed leader, but it must not hide
+    # a fund with another valid run. Select each fund's best non-zero result.
+    sorted_values = pd.to_numeric(sorted_runs["source_excess_annualized_return_pct"], errors="coerce")
+    eligible_runs = sorted_runs[sorted_values.notna() & sorted_values.ne(0)]
+    rank1 = eligible_runs.groupby("canonical_fund_label", sort=False, as_index=False).head(1).reset_index(drop=True)
     if not fund_label and top_funds and top_funds > 0:
         rank1 = rank1.head(top_funds).reset_index(drop=True)
     return rank1

@@ -23,79 +23,20 @@ import time
 from common import (
     LEGACY_TOTAL_RETURN_METHOD,
     NOT_APPLICABLE_TOTAL_RETURN_METHOD,
+    LockTimeout,
     calculate_rsi,
+    file_lock,
+    fund_group_from_label,
     fund_label_from_data_file,
     infer_total_return_method,
 )
-
-
-def last_available_data_date(data):
-    """Return the final valid date in a chart data frame or series index."""
-    if data is None or len(data) == 0:
-        return None
-
-    values = data["Date"] if isinstance(data, pd.DataFrame) and "Date" in data.columns else data.index
-    dates = pd.to_datetime(values, errors="coerce")
-    dates = dates[~pd.isna(dates)]
-    if len(dates) == 0:
-        return None
-    return dates.iloc[-1] if isinstance(dates, pd.Series) else dates[-1]
-
-
-def chart_duration_years(data):
-    """Return the actual elapsed calendar years covered by chart data."""
-    if data is None or len(data) == 0:
-        return None
-
-    values = data["Date"] if isinstance(data, pd.DataFrame) and "Date" in data.columns else data.index
-    dates = pd.to_datetime(values, errors="coerce")
-    dates = dates[~pd.isna(dates)]
-    if len(dates) < 2:
-        return None
-    start = dates.iloc[0] if isinstance(dates, pd.Series) else dates[0]
-    end = dates.iloc[-1] if isinstance(dates, pd.Series) else dates[-1]
-    return (pd.Timestamp(end) - pd.Timestamp(start)).days / 365.25
-
-
-def build_chart_context_label(source_data, run_data, lookback_years_value, offset_months_value):
-    """Format source, tuning, and run horizons for a chart header."""
-    source_years = chart_duration_years(source_data)
-    run_years = chart_duration_years(run_data)
-    if source_years is None or run_years is None:
-        return None
-    return (
-        f"Src{source_years:.1f}Y "
-        f"{float(lookback_years_value):.1f}Y-{int(offset_months_value)}M "
-        f"Run{run_years:.1f}Y"
-    )
-
-
-def set_chart_title(ax, title, last_data_date, *, fontsize, fontweight=None, context_label=None, generated_at=None):
-    """Set a chart title with run context, generation time, and final-data-date labels."""
-    ax.set_title(title, fontsize=fontsize, fontweight=fontweight, pad=18)
-    generated_label = None
-    if generated_at is not None:
-        generated_label = f"Generated {pd.Timestamp(generated_at):%Y-%m-%d %H:%M}"
-    header_parts = [
-        part
-        for part in (
-            context_label,
-            generated_label,
-            f"As of {pd.Timestamp(last_data_date):%Y-%m-%d}" if last_data_date is not None else None,
-        )
-        if part
-    ]
-    if header_parts:
-        ax.text(
-            1.0,
-            1.01,
-            "  ".join(header_parts),
-            transform=ax.transAxes,
-            ha="right",
-            va="bottom",
-            fontsize=max(fontsize - 4, 8),
-            color="#555555",
-        )
+from chart_output import save_figure_png
+from walk_forward_replay import (
+    advance_carry_exit_params,
+    evaluate_parameter_window,
+    run_artifact_dir,
+    save_replay_artifacts,
+)
 
 try:
     import yfinance as yf
@@ -117,7 +58,7 @@ started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 strategy_profile = "generic"
 ga_seed = None
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = SCRIPT_DIR  # backtest module is self-contained: data/ and outputs/ live inside backtest/
 DATA_DIR = REPO_ROOT / "data"
 OUTPUTS_DIR = REPO_ROOT / "outputs"
 LOGS_DIR = OUTPUTS_DIR / "logs"
@@ -132,18 +73,7 @@ DEFAULT_SHORT_EMA_BOUNDS = (2, 60)
 DEFAULT_LONG_EMA_BOUNDS = (30, 300)
 DEFAULT_RSI_OVERSOLD_BOUNDS = (10, 40)
 DEFAULT_RSI_OVERBOUGHT_BOUNDS = (60, 90)
-DEFAULT_STOP_LOSS_BOUNDS = (8, 15)
-DEFAULT_COOLDOWN_BOUNDS = (0, 3)
-DEFAULT_DRAWDOWN_EXIT_BOUNDS = (2.5, 4.0)
-DEFAULT_REENTRY_REBOUND_BOUNDS = (1.0, 3.0)
 DEFAULT_RSI_PERIOD = 14
-SUPPORTED_GENE_BOUND_OVERRIDE_KEYS = {
-    "stop_loss",
-    "cooldown",
-    "drawdown_exit_pct",
-    "reentry_rebound_pct",
-    "exposure_multiplier",
-}
 LOCK_RETRY_SCHEDULE_SECONDS = [30, 60, 120]
 history_fallback_files = []
 skip_top5_refresh_for_run = False
@@ -193,6 +123,13 @@ STRATEGY_PROFILE_SETTINGS = {
         "partial_reentry_rebound_multiplier": 1.0,
         "signal_reentry_buffer_scale": 0.0,
     },
+    # "Ride the uptrend, dodge the dips" variant: identical to generic (same
+    # 1.0x exposure, same drawdown_reentry execution, NO trend gates -- the
+    # gates are what made the qqq family worse in H-001) EXCEPT the GA fitness
+    # now penalizes missed upside after an exit. Directly targets the strongest
+    # measured driver of underperformance (corr(excess, missed_upside) = -0.637):
+    # it pushes the optimizer toward exits that avoid a dip WITHOUT sitting out
+    # the rebound. Stays within the no-leverage rule.
     "generic-ride": {
         "execution_mode": "drawdown_reentry",
         "drawdown_exit_multiplier": 1.0,
@@ -211,41 +148,28 @@ STRATEGY_PROFILE_SETTINGS = {
         "partial_reentry_rebound_multiplier": 1.0,
         "signal_reentry_buffer_scale": 0.0,
     },
+    # AAPL fine-tuned "ride-slow" variant (H-014+), derived from a surrogate
+    # model of 132 valid AAPL runs (RF CV R2 = +0.55, genuinely predictive).
+    # Same 1.0x, no gates, missed-upside penalty as generic-ride. MINIMAL change:
+    # constrain ONLY long_ema to be long (150-300). Both winning AAPL recipes in
+    # the surrogate agreed on a long trend line (~220-230); with wide bounds the
+    # GA tends to overfit to short EMAs in-sample and generalize worse OOS, so
+    # forcing a long trend line prevents that. short_ema / drawdown_exit /
+    # reentry / cooldown stay wide (the two good recipes DISAGREE on those --
+    # e.g. drawdown_exit 2.6 vs 9.8 -- so pinning them would exclude a winner).
     "generic-ride-slow": {
         "execution_mode": "drawdown_reentry",
         "drawdown_exit_multiplier": 1.0,
         "cooldown_extra_periods": 0,
         "reentry_rebound_multiplier": 1.0,
-        "gene_bounds": {"long_ema": (150, 300)},
-        "require_price_above_long_ema_for_reentry": False,
-        "require_positive_long_slope_for_reentry": False,
-        "require_price_below_long_ema_for_exit": False,
-        "require_negative_long_slope_for_exit": False,
-        "missed_upside_after_exit_weight": 1.0,
-        "default_exposure_multiplier": 1.0,
-        "enable_partial_derisk": False,
-        "partial_exit_target_exposure": 0.5,
-        "full_exit_drawdown_multiplier": 1.0,
-        "partial_reentry_rebound_multiplier": 1.0,
-        "signal_reentry_buffer_scale": 0.0,
-    },
-    "generic-bh-reachable": {
-        "execution_mode": "drawdown_reentry",
-        "drawdown_exit_multiplier": 1.0,
-        "cooldown_extra_periods": 0,
-        "reentry_rebound_multiplier": 1.0,
         "gene_bounds": {
-            "stop_loss": (8, 101),
-            "cooldown": (0, 3),
-            "drawdown_exit_pct": (2.5, 101),
-            "reentry_rebound_pct": (0.0, 3.0),
-            "exposure_multiplier": (1.0, 1.0),
+            "long_ema": (150, 300),
         },
         "require_price_above_long_ema_for_reentry": False,
         "require_positive_long_slope_for_reentry": False,
         "require_price_below_long_ema_for_exit": False,
         "require_negative_long_slope_for_exit": False,
-        "missed_upside_after_exit_weight": 0.0,
+        "missed_upside_after_exit_weight": 1.0,
         "default_exposure_multiplier": 1.0,
         "enable_partial_derisk": False,
         "partial_exit_target_exposure": 0.5,
@@ -298,6 +222,12 @@ STRATEGY_PROFILE_SETTINGS = {
         "partial_reentry_rebound_multiplier": 0.5,
         "signal_reentry_buffer_scale": 0.10,
     },
+    # Fair-comparison control for qqq-return-plus: byte-for-byte identical
+    # EXCEPT the exposure gene is pinned to 1.0x, so the strategy can never
+    # deploy more capital than a 1.0x buy & hold. Isolates "timing skill" from
+    # "extra capital / leverage" -- if this beats B&H, the edge is real timing;
+    # if it collapses (as the plain generic profile does on AAPL), the
+    # qqq-return-plus win was substantially the leverage, not the timing.
     "qqq-return-plus-nolev": {
         "execution_mode": "drawdown_reentry",
         "drawdown_exit_multiplier": 1.0,
@@ -348,6 +278,14 @@ STRATEGY_PROFILE_SETTINGS = {
         "partial_reentry_rebound_multiplier": 1.0,
         "signal_reentry_buffer_scale": 0.0,
     },
+    # Un-levered pure buy & hold. Identical to qqq-buyhold-plus except the
+    # exposure gene is pinned to 1.0 -- the same relationship
+    # qqq-return-plus-nolev has to qqq-return-plus. Exists as a CONTROL, not a
+    # strategy: it certifies the measuring instrument. If a run of this reports
+    # excess_annualized_return_pct near 0 and time_invested_pct near 100, then
+    # the walk-forward stitching, carry-state hand-off and annualization are all
+    # accounted correctly. If it does not, every excess figure in the history is
+    # suspect and that is the finding, not the strategy result.
     "buyhold-1x": {
         "execution_mode": "drawdown_reentry",
         "drawdown_exit_multiplier": 1.0,
@@ -369,6 +307,53 @@ STRATEGY_PROFILE_SETTINGS = {
         "disable_timing_exits": True,
         "disable_stop_loss": True,
         "disable_take_profit": True,
+        "enable_partial_derisk": False,
+        "partial_exit_target_exposure": 0.5,
+        "full_exit_drawdown_multiplier": 1.0,
+        "partial_reentry_rebound_multiplier": 1.0,
+        "signal_reentry_buffer_scale": 0.0,
+    },
+    # Identical to `generic` in every respect EXCEPT the exit-gene bounds, so any
+    # difference in results is attributable to the bounds alone.
+    #
+    # Why this profile exists: under `generic` the bounds are stop_loss (8,15),
+    # drawdown_exit_pct (2.5,4.0) and reentry_rebound_pct (1.0,3.0), which means
+    # "never exit" is not expressible -- buy & hold sits OUTSIDE the search
+    # space. On a name like NVDA, whose median 6-month peak-drawdown is ~22%, a
+    # 4% drawdown exit fires in essentially every window, so the strategy is
+    # forced out of the market (time_invested_pct never exceeded 73.3% across
+    # 140 NVDA runs) and gives up the rebound.
+    #
+    # Both price_change_pct and drawdown_from_peak_pct are floored at -100
+    # (price cannot go below zero), so a stop_loss or drawdown_exit_pct >= 100
+    # can never fire. Widening the upper bound past 100 therefore makes "never
+    # exit" a reachable CORNER of the space without touching any strategy logic
+    # -- the GA may choose it when nothing beats buy & hold, and is still free
+    # to trade, since the old trading region (8-15 / 2.5-4) remains inside these
+    # bounds. Exposure stays pinned at 1.0: no leverage, ever.
+    #
+    # Deliberately NOT using always_invested/disable_* -- those FORCE buy & hold
+    # rather than letting the optimizer select it.
+    "generic-bh-reachable": {
+        "execution_mode": "drawdown_reentry",
+        "drawdown_exit_multiplier": 1.0,
+        "cooldown_extra_periods": 0,
+        "reentry_rebound_multiplier": 1.0,
+        "gene_bounds": {
+            # NOTE: the key is "stop_loss", not "stop_loss_pct" -- see
+            # resolve_profile_gene_bounds(). A wrong key fails silently.
+            "stop_loss": (8, 101),
+            "cooldown": (0, 3),
+            "drawdown_exit_pct": (2.5, 101),
+            "reentry_rebound_pct": (0.0, 3.0),
+            "exposure_multiplier": (1.0, 1.0),
+        },
+        "require_price_above_long_ema_for_reentry": False,
+        "require_positive_long_slope_for_reentry": False,
+        "require_price_below_long_ema_for_exit": False,
+        "require_negative_long_slope_for_exit": False,
+        "missed_upside_after_exit_weight": 0.0,
+        "default_exposure_multiplier": 1.0,
         "enable_partial_derisk": False,
         "partial_exit_target_exposure": 0.5,
         "full_exit_drawdown_multiplier": 1.0,
@@ -417,6 +402,39 @@ def parse_args():
         type=int,
         default=6,
         help="Offset period in months (default: 6)"
+    )
+    parser.add_argument(
+        "--transition-policy",
+        type=str,
+        choices=["none", "grandfather"],
+        default="none",
+        help=(
+            "How a position carried across an offset-month boundary is exited. "
+            "'grandfather' keeps the exit rules (SL/TP/drawdown/EMA regime) of "
+            "the window that opened the position until it closes; new params "
+            "always govern entries. Default: none (current behavior)."
+        ),
+    )
+    parser.add_argument(
+        "--ga-warm-start",
+        action="store_true",
+        help=(
+            "Seed each walk-forward window's GA with the previous window's best "
+            "parameters instead of starting from random guesses. Shrinks the "
+            "parameter jump at offset-month boundaries and the tuning noise "
+            "floor. Default: off (every window re-tunes from scratch)."
+        ),
+    )
+    parser.add_argument(
+        "--ga-warm-start-fraction",
+        type=float,
+        default=DEFAULT_GA_WARM_START_FRACTION,
+        help=(
+            "Fraction of the GA population inherited from the previous window "
+            f"when --ga-warm-start is set (default: {DEFAULT_GA_WARM_START_FRACTION}). "
+            "At least one individual always stays random so the search can "
+            "still escape a stale answer."
+        ),
     )
     parser.add_argument(
         "--initial-capital",
@@ -470,28 +488,26 @@ def parse_args():
         metavar=("MIN", "MAX"),
         help="RSI overbought integer bounds for GA search (default: 60 90)"
     )
+    # Exit-gene bounds. These take precedence over the active profile's
+    # gene_bounds, so a custom value always wins over the profile default.
+    # Note both stop loss and drawdown exit are compared against a quantity
+    # floored at -100, so any value >= 100 disables that exit entirely -- which
+    # is how buy & hold becomes reachable.
     parser.add_argument(
         "--stop-loss-bounds",
         nargs=2,
         type=float,
         default=None,
         metavar=("MIN", "MAX"),
-        help="Override stop-loss bounds for this run"
+        help="Stop-loss %% bounds for GA search, overrides the profile "
+             "(profile default, e.g. generic: 8 15). >=100 disables the stop."
     )
     parser.add_argument(
         "--take-profit-pct",
         type=float,
         default=None,
         metavar="PCT",
-        help="Enable a GA-tuned take-profit gene from 0 through PCT gain",
-    )
-    parser.add_argument(
-        "--cooldown-bounds",
-        nargs=2,
-        type=int,
-        default=None,
-        metavar=("MIN", "MAX"),
-        help="Override cooldown integer bounds for this run"
+        help="Enable GA-tuned take-profit exits from 0 through PCT gain. Omit to preserve the current disabled behavior."
     )
     parser.add_argument(
         "--drawdown-exit-bounds",
@@ -499,7 +515,8 @@ def parse_args():
         type=float,
         default=None,
         metavar=("MIN", "MAX"),
-        help="Override drawdown-exit bounds for this run"
+        help="Drawdown-exit %% bounds for GA search, overrides the profile "
+             "(profile default, e.g. generic: 2.5 4.0). >=100 disables the exit."
     )
     parser.add_argument(
         "--reentry-rebound-bounds",
@@ -507,15 +524,17 @@ def parse_args():
         type=float,
         default=None,
         metavar=("MIN", "MAX"),
-        help="Override re-entry rebound bounds for this run"
+        help="Re-entry rebound %% bounds for GA search, overrides the profile "
+             "(profile default, e.g. generic: 1.0 3.0). 0 allows immediate re-entry."
     )
     parser.add_argument(
-        "--exposure-multiplier-bounds",
+        "--cooldown-bounds",
         nargs=2,
-        type=float,
+        type=int,
         default=None,
         metavar=("MIN", "MAX"),
-        help="Override exposure-multiplier bounds for this run"
+        help="Cooldown-period bounds for GA search, overrides the profile "
+             "(profile default, e.g. generic: 0 3)"
     )
     parser.add_argument(
         "--symbols",
@@ -549,7 +568,11 @@ def parse_args():
     parser.add_argument(
         "--fund-group",
         default=None,
-        help="Optional base fund grouping for output histories",
+        help="Base fund grouping for the output folder / merged history "
+             "(default: the data-file label with any -NY history-slice suffix "
+             "stripped, e.g. AAPL-3Y -> AAPL). This is what the fund_label "
+             "column records; the full slice label is kept in the "
+             "fund_slice_label column and in filenames."
     )
     parser.add_argument(
         "--data-files",
@@ -558,15 +581,14 @@ def parse_args():
         help="Use one or more existing CSV files instead of downloading by symbol"
     )
     parser.add_argument(
-        "--data-glob", "--fund-glob",
-        dest="data_glob",
-        default="*_nav_*Y.csv",
-        help="Local CSV glob (in data/) to backtest when no data file is supplied",
+        "--data-glob",
+        default="*.csv",
+        help="Local stock CSV glob (in data/) to backtest when no data file is supplied"
     )
     parser.add_argument(
         "--price-column",
-        default="TotalReturn",
-        help="CSV price column to backtest; default prefers Manulife TotalReturn"
+        default="Adj Close",
+        help="CSV price column to backtest; default is dividend-adjusted Adj Close"
     )
     parser.add_argument(
         "--profile-override-preset",
@@ -641,115 +663,69 @@ def apply_profile_override_preset(profile_name, preset_name):
             profile_settings[key] = value
 
 
-def normalize_gene_bound_overrides(gene_bound_overrides):
-    """Validate and normalize explicit per-run gene-bound overrides."""
-    if gene_bound_overrides is None:
-        return {}
-    if not isinstance(gene_bound_overrides, dict):
-        raise ValueError("gene_bound_overrides must be a dictionary")
-
-    unknown_keys = sorted(
-        set(gene_bound_overrides) - SUPPORTED_GENE_BOUND_OVERRIDE_KEYS,
-        key=str,
-    )
-    if unknown_keys:
-        unknown_display = ", ".join(str(key) for key in unknown_keys)
-        raise ValueError(f"Unknown gene bound override key(s): {unknown_display}")
-
-    normalized = {}
-    for key, raw_bounds in gene_bound_overrides.items():
-        if not isinstance(raw_bounds, (list, tuple)) or len(raw_bounds) != 2:
-            raise ValueError(f"{key} bounds require exactly two values: MIN MAX")
-
-        try:
-            lower = float(raw_bounds[0])
-            upper = float(raw_bounds[1])
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{key} bounds must be numeric") from exc
-
-        if not np.isfinite(lower) or not np.isfinite(upper):
-            raise ValueError(f"{key} bounds must be finite")
-        if lower < 0 or upper < 0:
-            raise ValueError(f"{key} bounds must be non-negative")
-        if lower > upper:
-            raise ValueError(f"{key} minimum must be <= maximum")
-
-        if key == "cooldown":
-            if not lower.is_integer() or not upper.is_integer():
-                raise ValueError("cooldown bounds must be integers")
-            normalized[key] = (int(lower), int(upper))
-        else:
-            normalized[key] = (lower, upper)
-
-    return normalized
-
-
-def build_gene_bound_overrides_from_args(args):
-    """Build the Python override dictionary from optional CLI arguments."""
-    cli_values = {
-        "stop_loss": args.stop_loss_bounds,
-        "cooldown": args.cooldown_bounds,
-        "drawdown_exit_pct": args.drawdown_exit_bounds,
-        "reentry_rebound_pct": args.reentry_rebound_bounds,
-        "exposure_multiplier": args.exposure_multiplier_bounds,
-    }
-    return normalize_gene_bound_overrides({
-        key: value for key, value in cli_values.items() if value is not None
-    })
-
-
-def get_exposure_bounds(strategy_profile_name, gene_bound_overrides=None):
+def get_exposure_bounds(strategy_profile_name):
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
     default_exposure = profile_settings.get("default_exposure_multiplier", 1.0)
-    exposure_bounds = profile_settings.get("gene_bounds", {}).get(
+    return profile_settings.get("gene_bounds", {}).get(
         "exposure_multiplier",
         (default_exposure, default_exposure),
     )
-    overrides = normalize_gene_bound_overrides(gene_bound_overrides)
-    return overrides.get("exposure_multiplier", exposure_bounds)
 
 
 def resolve_profile_gene_bounds(strategy_profile_name, short_ema_bounds, long_ema_bounds,
                                 sl_bounds, cd_bounds, drawdown_exit_bounds,
-                                reentry_rebound_bounds, gene_bound_overrides=None):
-    """Resolve defaults, profile bounds, then explicit per-run overrides."""
+                                reentry_rebound_bounds, overrides=None):
+    """Resolve the optimizer's gene bounds for a profile.
+
+    Precedence, most specific first:
+      1. `overrides` -- explicit per-run CLI values (--stop-loss-bounds etc.)
+      2. the profile's own `gene_bounds` dict
+      3. the built-in defaults passed in by the caller
+
+    An override of None means "not specified", so passing a partial dict only
+    overrides the genes actually named.
+    """
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
     profile_bounds = profile_settings.get("gene_bounds", {})
-    overrides = normalize_gene_bound_overrides(gene_bound_overrides)
+    overrides = overrides or {}
+
+    def pick(key, fallback):
+        if overrides.get(key) is not None:
+            return overrides[key]
+        return profile_bounds.get(key, fallback)
+
     return (
-        profile_bounds.get("short_ema", short_ema_bounds),
-        profile_bounds.get("long_ema", long_ema_bounds),
-        overrides.get("stop_loss", profile_bounds.get("stop_loss", sl_bounds)),
-        overrides.get("cooldown", profile_bounds.get("cooldown", cd_bounds)),
-        overrides.get(
-            "drawdown_exit_pct",
-            profile_bounds.get("drawdown_exit_pct", drawdown_exit_bounds),
-        ),
-        overrides.get(
-            "reentry_rebound_pct",
-            profile_bounds.get("reentry_rebound_pct", reentry_rebound_bounds),
-        ),
+        pick("short_ema", short_ema_bounds),
+        pick("long_ema", long_ema_bounds),
+        pick("stop_loss", sl_bounds),
+        pick("cooldown", cd_bounds),
+        pick("drawdown_exit_pct", drawdown_exit_bounds),
+        pick("reentry_rebound_pct", reentry_rebound_bounds),
     )
-
-
-def build_gene_bound_metadata(gene_bound_overrides, effective_gene_bounds):
-    """Return reproducible run-history fields for injected and effective bounds."""
-    overrides = normalize_gene_bound_overrides(gene_bound_overrides)
-    metadata = {
-        "gene_bound_overrides": json.dumps(overrides, sort_keys=True),
-    }
-    for key in sorted(SUPPORTED_GENE_BOUND_OVERRIDE_KEYS):
-        bounds = effective_gene_bounds.get(key)
-        if bounds is None:
-            continue
-        metadata[f"{key}_bound_min"] = bounds[0]
-        metadata[f"{key}_bound_max"] = bounds[1]
-    return metadata
 
 def build_deterministic_seed(*parts):
     """Create a stable 32-bit seed from run metadata."""
     seed_material = "|".join(str(part) for part in parts)
     return int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16)
+
+
+def normalize_ga_seed(value):
+    """Normalize CLI/CSV seed values to the integer type NumPy and PyGAD require."""
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"deterministic", "none", "nan"}:
+        return None
+    try:
+        numeric = float(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid GA seed: {value!r}") from exc
+    if not np.isfinite(numeric) or not numeric.is_integer():
+        raise ValueError(f"GA seed must be an integer: {value!r}")
+    seed = int(numeric)
+    if not 0 <= seed <= np.iinfo(np.uint32).max:
+        raise ValueError(f"GA seed must be between 0 and {np.iinfo(np.uint32).max}")
+    return seed
 
 
 def json_default(value):
@@ -771,6 +747,32 @@ def format_date(value):
     if value is None or pd.isna(value):
         return ""
     return pd.Timestamp(value).strftime("%Y-%m-%d")
+
+
+def year_span(start_date, end_date):
+    """Return the elapsed time between two data points as decimal years."""
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date)
+    return max(0.0, (end_ts - start_ts).days / 365.2425)
+
+
+def format_years(years):
+    return f"{max(0.0, float(years)):.1f}Y"
+
+
+def build_backtest_chart_title(stock_name, source_start_date, source_end_date,
+                               lookback_years_value, offset_months_value,
+                               run_start_date, run_end_date):
+    """Build a compact title that describes the source and tested periods."""
+    source_years = year_span(source_start_date, source_end_date)
+    run_years = max(0.0, source_years - float(lookback_years_value))
+    return (
+        f"Adaptive Strategy {stock_name}-"
+        f"Src{format_years(source_years)} "
+        f"{lookback_years_value}Y-{offset_months_value}M "
+        f"Run{format_years(run_years)} "
+        f"{format_date(source_end_date)}"
+    )
 
 
 def build_run_id(started_at_value, fund_label, config):
@@ -816,8 +818,10 @@ def safe_log(message):
 
 
 def build_lock_fallback_path(path):
+    # The pid keeps run10a and run10b from picking the same fallback name when they
+    # both give up inside the same second.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return path.with_name(f"{path.stem}_{timestamp}{path.suffix}")
+    return path.with_name(f"{path.stem}_{timestamp}_{os.getpid()}{path.suffix}")
 
 
 def record_history_fallback(original_path, fallback_path):
@@ -832,30 +836,35 @@ def run_with_lock_resilience(path, writer, purpose):
     path.parent.mkdir(parents=True, exist_ok=True)
     last_error = None
 
+    # PermissionError means another application (typically Excel) holds the file.
+    # LockTimeout means a sibling run (run10a vs run10b) is mid-write. Both are
+    # transient, so both get the same retry schedule before falling back.
     for attempt_index, wait_seconds in enumerate(LOCK_RETRY_SCHEDULE_SECONDS, start=1):
         try:
-            writer(path)
+            with file_lock(path, on_message=safe_log):
+                writer(path)
             return {
                 "path": str(path),
                 "used_fallback": False,
                 "locked": False,
             }
-        except PermissionError as exc:
+        except (PermissionError, LockTimeout) as exc:
             last_error = exc
             safe_log(
-                f"{purpose} locked: {path}. "
+                f"{purpose} unavailable ({type(exc).__name__}): {path}. "
                 f"Retry {attempt_index}/{len(LOCK_RETRY_SCHEDULE_SECONDS)} in {wait_seconds}s."
             )
             time.sleep(wait_seconds)
 
     try:
-        writer(path)
+        with file_lock(path, on_message=safe_log):
+            writer(path)
         return {
             "path": str(path),
             "used_fallback": False,
             "locked": False,
         }
-    except PermissionError as exc:
+    except (PermissionError, LockTimeout) as exc:
         last_error = exc
 
     fallback_path = build_lock_fallback_path(path)
@@ -944,6 +953,39 @@ def write_csv_with_lock_resilience(df, path, index=False, purpose="History CSV w
     )
 
 
+# --- Data vintage fingerprints ----------------------------------------------
+# Derived slice files (MSFT-3Y.csv etc.) are regenerated periodically and roll
+# forward silently: same filename, same fund_slice_label, often the same
+# data_end, but a different start date and row count. Three separate A/B
+# comparisons were invalidated that way before this existed, because nothing in
+# the run history distinguished the vintages. Two fingerprints are recorded:
+#
+#   data_fingerprint  - hash of the cleaned (Date, NAV) series actually traded.
+#                       This is what determines results, so it is the one to
+#                       compare runs on.
+#   data_file_sha256  - hash of the raw CSV bytes. Cheap for the PowerShell
+#                       sweep drivers to recompute with Get-FileHash, so it is
+#                       what the resume identity keys on.
+def compute_data_fingerprint(frame, price_series_name='NAV'):
+    """Stable hash of the exact price series a run will trade."""
+    digest = hashlib.sha256()
+    dates = frame.index if frame.index.name == 'Date' else frame['Date']
+    values = frame[price_series_name]
+    for date_value, price in zip(pd.to_datetime(dates), values):
+        # Fixed formatting so float repr changes across pandas/numpy versions
+        # cannot alter the fingerprint of unchanged data.
+        digest.update(f"{date_value:%Y-%m-%d}:{float(price):.10f};".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def compute_file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def sanitize_fund_folder_name(fund_label):
     """Return a stable filesystem-safe fund folder name while preserving useful separators."""
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fund_label or "").strip())
@@ -1017,7 +1059,8 @@ def get_machine_metadata():
     }
 
 
-def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, data_end,
+def build_run_metadata(run_id, csv_path, fund_label, fund_slice_label,
+                       price_column, data_start, data_end,
                        row_count, lookback_years_value, offset_months_value,
                        initial_capital, backtest_start, backtest_end,
                        strategy_profile_value, profile_override_preset_value,
@@ -1030,23 +1073,19 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
                        rsi_overbought_bounds_value=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                        machine_metadata=None,
                        total_return_method=NOT_APPLICABLE_TOTAL_RETURN_METHOD,
-                       gene_bound_overrides=None,
-                       effective_gene_bounds=None,
-                       fund_slice_label=None,
+                       stop_loss_bounds_value=None, cooldown_bounds_value=None,
+                       drawdown_exit_bounds_value=None, reentry_rebound_bounds_value=None,
                        take_profit_max_value=None,
-                       rebuild_source_run_id="",
-                       rebuild_batch_id="",
-                       rebuild_mode=""):
+                       rebuild_source_run_id="", rebuild_batch_id="", rebuild_mode=""):
     machine_metadata = machine_metadata or get_machine_metadata()
-    gene_bound_metadata = build_gene_bound_metadata(
-        gene_bound_overrides,
-        effective_gene_bounds or {},
-    )
     return {
         "run_id": run_id,
         **machine_metadata,
+        # fund_label is the fund GROUP (AAPL), so every history slice of a ticker
+        # aggregates as one fund. fund_slice_label keeps the slice that produced
+        # the row (AAPL-3Y), which is what filenames and run_id still use.
         "fund_label": fund_label,
-        "fund_slice_label": fund_slice_label or fund_label,
+        "fund_slice_label": fund_slice_label,
         "data_file": str(csv_path),
         "price_column": price_column,
         "total_return_method": total_return_method,
@@ -1073,14 +1112,24 @@ def build_run_metadata(run_id, csv_path, fund_label, price_column, data_start, d
         "rsi_oversold_max": rsi_oversold_bounds_value[1],
         "rsi_overbought_min": rsi_overbought_bounds_value[0],
         "rsi_overbought_max": rsi_overbought_bounds_value[1],
+        # The EFFECTIVE exit-gene bounds actually searched, after defaults <-
+        # profile <- CLI override. Without these, two runs with very different
+        # exit behaviour are indistinguishable in the history.
+        "stop_loss_min": stop_loss_bounds_value[0] if stop_loss_bounds_value else "",
+        "stop_loss_max": stop_loss_bounds_value[1] if stop_loss_bounds_value else "",
+        "cooldown_min": cooldown_bounds_value[0] if cooldown_bounds_value else "",
+        "cooldown_max": cooldown_bounds_value[1] if cooldown_bounds_value else "",
+        "drawdown_exit_min": drawdown_exit_bounds_value[0] if drawdown_exit_bounds_value else "",
+        "drawdown_exit_max": drawdown_exit_bounds_value[1] if drawdown_exit_bounds_value else "",
+        "reentry_rebound_min": reentry_rebound_bounds_value[0] if reentry_rebound_bounds_value else "",
+        "reentry_rebound_max": reentry_rebound_bounds_value[1] if reentry_rebound_bounds_value else "",
+        "take_profit_max": take_profit_max_value if take_profit_max_value is not None else "",
         "mutation_rates": ",".join(str(value) for value in mutation_rates_value) if mutation_rates_value else "default grid",
         "crossover_rates": ",".join(str(value) for value in crossover_rates_value) if crossover_rates_value else "default grid",
-        "take_profit_max": take_profit_max_value if take_profit_max_value is not None else "",
         "run_started_at": started_at,
         "rebuild_source_run_id": rebuild_source_run_id,
         "rebuild_batch_id": rebuild_batch_id,
         "rebuild_mode": rebuild_mode,
-        **gene_bound_metadata,
     }
 
 
@@ -1134,11 +1183,20 @@ def refresh_top5_parameter_sets():
     if not TUNING_HISTORY_FILE.exists():
         return
 
+    # Read under the same lock the appenders use, so a sibling run cannot append
+    # mid-read and hand us a torn file.
     try:
-        history = pd.read_csv(TUNING_HISTORY_FILE)
+        with file_lock(TUNING_HISTORY_FILE, on_message=safe_log):
+            history = pd.read_csv(TUNING_HISTORY_FILE)
     except PermissionError:
         safe_log(
             f"Skipping top-5 refresh because tuning history is locked: {TUNING_HISTORY_FILE}"
+        )
+        return
+    except LockTimeout:
+        safe_log(
+            f"Skipping top-5 refresh; another run holds {TUNING_HISTORY_FILE}. "
+            "The next run will refresh it."
         )
         return
     if history.empty:
@@ -1207,9 +1265,16 @@ def refresh_top5_parameter_sets():
         purpose="Top-5 parameter summary write",
     )
     for fund_label, fund_top5 in top5.groupby("fund_label", dropna=False):
+        # fund_label is the fund group for rows written by current runs, so this
+        # produces one file per ticker (funds/AAPL/tunings/AAPL-top5_parameter_sets.csv)
+        # covering every history slice. fund_group_from_label still runs because
+        # history written before the change can carry slice labels (AAPL-3Y); such
+        # rows group separately but at least land in the right folder.
+        top5_dir = fund_output_dirs(fund_group_from_label(fund_label))["tunings"]
+        top5_path = top5_dir / f"{sanitize_fund_folder_name(fund_label)}-top5_parameter_sets.csv"
         write_csv_with_lock_resilience(
             fund_top5,
-            fund_history_paths(fund_label)["top5"],
+            top5_path,
             index=False,
             purpose=f"Fund top-5 parameter summary write ({fund_label})",
         )
@@ -1236,11 +1301,6 @@ def infer_fund_output_label(csv_file):
         return f"{fund_code}_{sanitize_label(short_name)}"
 
     return fund_label_from_data_file(csv_file)
-
-
-def fund_group_from_label(label):
-    """Group history-slice labels such as AAPL-3Y under their base fund."""
-    return re.sub(r"-\d+(?:\.\d+)?Y$", "", str(label), flags=re.IGNORECASE)
 
 
 def ensure_output_dirs():
@@ -1330,6 +1390,25 @@ def normalize_ema_bounds(value, label, minimum=1):
     if value is None or len(value) != 2:
         raise ValueError(f"{label} requires exactly two values: MIN MAX")
     lower, upper = int(value[0]), int(value[1])
+    if lower < minimum:
+        raise ValueError(f"{label} minimum must be >= {minimum}")
+    if lower > upper:
+        raise ValueError(f"{label} minimum must be <= maximum")
+    return (lower, upper)
+
+
+def normalize_range_bounds(value, label, minimum=0.0, as_int=False):
+    """Normalize a MIN MAX pair for a continuous (or integer) GA gene.
+
+    Returns None when nothing was supplied, so callers can tell "not specified"
+    apart from "specified as the default" -- that distinction drives the
+    override precedence in resolve_profile_gene_bounds().
+    """
+    if value is None:
+        return None
+    if len(value) != 2:
+        raise ValueError(f"{label} requires exactly two values: MIN MAX")
+    lower, upper = (int(value[0]), int(value[1])) if as_int else (float(value[0]), float(value[1]))
     if lower < minimum:
         raise ValueError(f"{label} minimum must be >= {minimum}")
     if lower > upper:
@@ -1468,7 +1547,8 @@ def backtest_enhanced_dual_ema(df, short_ema, long_ema, initial_capital=10000,
                               trade_start_idx=0,
                               return_state=False,
                               strategy_profile_name="generic",
-                              exposure_multiplier=None):
+                              exposure_multiplier=None,
+                              carry_exit_params=None):
     """Index-tuned dual EMA strategy that prefers trend persistence."""
     df = df.copy()
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
@@ -1484,7 +1564,6 @@ def backtest_enhanced_dual_ema(df, short_ema, long_ema, initial_capital=10000,
         exposure_multiplier = profile_settings.get("default_exposure_multiplier", 1.0)
     exposure_multiplier = max(0.0, float(exposure_multiplier))
     partial_exit_target_exposure = profile_settings.get('partial_exit_target_exposure', 0.5)
-    full_exit_drawdown_pct = effective_drawdown_exit_pct * profile_settings.get('full_exit_drawdown_multiplier', 1.0)
 
     # Ensure Date index if not present
     if 'Date' not in df.columns and hasattr(df.index, 'name') and df.index.name == 'Date':
@@ -1561,6 +1640,28 @@ def backtest_enhanced_dual_ema(df, short_ema, long_ema, initial_capital=10000,
         df.loc[trend_buy_block | trend_sell_block, 'Trend_Filter_Block'] = True
 
     initial_state = initial_state or {}
+    # Grandfather transition policy: a position carried in from a previous
+    # walk-forward window keeps the exit rules of the window that opened it
+    # (carry_exit_params) until it is fully closed. Entries and any position
+    # opened inside this window always use the current parameters.
+    carried_position_open = (
+        carry_exit_params is not None
+        and float(initial_state.get('position', 0.0) or 0.0) > 1e-9
+    )
+    carry_short_vals = carry_long_vals = carry_long_slope = carry_sell_regime = None
+    if carried_position_open:
+        carry_short_vals = calculate_ema(df['NAV'], int(carry_exit_params['short_ema']))
+        carry_long_vals = calculate_ema(df['NAV'], int(carry_exit_params['long_ema']))
+        carry_long_slope = carry_long_vals.diff(5).fillna(0.0)
+        carry_sell_regime = (
+            (carry_short_vals <= carry_long_vals)
+            & (df['NAV'] < carry_long_vals)
+            & (carry_long_slope < 0)
+        )
+        if use_rsi_filter:
+            carry_sell_regime = carry_sell_regime & ~(
+                df['RSI'] < carry_exit_params.get('rsi_oversold', rsi_oversold)
+            )
     position = float(initial_state.get('position', 0.0))
     shares = float(initial_state.get('shares', 0.0))
     cash = float(initial_state.get('cash', initial_capital))
@@ -1643,18 +1744,45 @@ def backtest_enhanced_dual_ema(df, short_ema, long_ema, initial_capital=10000,
         exit_reason = None
         entry_blocked_reason = None
 
+        # While the carried position is open, exits are judged by the params of
+        # the window that opened it; otherwise by the current window's params.
+        use_carry_exits = carried_position_open and position > 1e-9
+        if use_carry_exits:
+            active_stop_loss_pct = float(carry_exit_params['stop_loss_pct'])
+            active_use_take_profit = bool(carry_exit_params.get('use_take_profit', use_take_profit))
+            active_take_profit_pct = float(carry_exit_params.get('take_profit_pct', take_profit_pct))
+            active_drawdown_exit_pct = (
+                float(carry_exit_params['drawdown_exit_pct'])
+                * profile_settings['drawdown_exit_multiplier']
+            )
+            exit_short_ema_val = carry_short_vals.iloc[i]
+            exit_long_ema_val = carry_long_vals.iloc[i]
+            exit_long_slope_val = carry_long_slope.iloc[i]
+            exit_signal_is_sell = bool(carry_sell_regime.iloc[i])
+        else:
+            active_stop_loss_pct = stop_loss_pct
+            active_use_take_profit = use_take_profit
+            active_take_profit_pct = take_profit_pct
+            active_drawdown_exit_pct = effective_drawdown_exit_pct
+            exit_short_ema_val = short_ema_val
+            exit_long_ema_val = long_ema_val
+            exit_long_slope_val = df['Long_EMA_Slope_5'].iloc[i]
+            exit_signal_is_sell = current_signal < 0
+
         if position > 0 and entry_price > 0:
             price_change_pct = (current_price - entry_price) / entry_price * 100
             peak_price = max(peak_price, current_price)
-            if use_stop_loss and not disable_stop_loss and price_change_pct <= -stop_loss_pct:
+            if use_stop_loss and not disable_stop_loss and price_change_pct <= -active_stop_loss_pct:
                 exit_value = exit_position(current_price)
                 trades.append(('STOP_LOSS', trade_marker, current_price, exit_value))
                 exit_reason = f"STOP_LOSS ({price_change_pct:.2f}%)"
                 cooldown_counter = effective_cooldown_period
-            elif use_take_profit and not disable_take_profit and price_change_pct >= take_profit_pct:
+                carried_position_open = False
+            elif active_use_take_profit and not disable_take_profit and price_change_pct >= active_take_profit_pct:
                 exit_value = exit_position(current_price)
                 trades.append(('TAKE_PROFIT', trade_marker, current_price, exit_value))
                 exit_reason = f"TAKE_PROFIT ({price_change_pct:.2f}%)"
+                carried_position_open = False
 
         if position < 1:
             rebound_from_low_pct = ((current_price - cash_low_watermark) / cash_low_watermark * 100) if cash_low_watermark > 0 else 0
@@ -1725,25 +1853,29 @@ def backtest_enhanced_dual_ema(df, short_ema, long_ema, initial_capital=10000,
             drawdown_from_peak_pct = ((current_price - peak_price) / peak_price * 100) if peak_price > 0 else 0
             if execution_mode == "regime_signal":
                 exit_conditions_met = (
-                    current_signal < 0
-                    and drawdown_from_peak_pct <= -effective_drawdown_exit_pct
+                    exit_signal_is_sell
+                    and drawdown_from_peak_pct <= -active_drawdown_exit_pct
                 )
             else:
                 exit_conditions_met = (
-                    drawdown_from_peak_pct <= -effective_drawdown_exit_pct
-                    and current_price < short_ema_val
+                    drawdown_from_peak_pct <= -active_drawdown_exit_pct
+                    and current_price < exit_short_ema_val
                 )
             if profile_settings['require_price_below_long_ema_for_exit']:
-                exit_conditions_met = exit_conditions_met and current_price < long_ema_val
+                exit_conditions_met = exit_conditions_met and current_price < exit_long_ema_val
             if profile_settings['require_negative_long_slope_for_exit']:
-                exit_conditions_met = exit_conditions_met and df['Long_EMA_Slope_5'].iloc[i] < 0
+                exit_conditions_met = exit_conditions_met and exit_long_slope_val < 0
             if disable_timing_exits:
                 exit_conditions_met = False
 
             if exit_conditions_met:
+                active_full_exit_drawdown_pct = (
+                    active_drawdown_exit_pct
+                    * profile_settings.get('full_exit_drawdown_multiplier', 1.0)
+                )
                 full_exit_required = (
                     not profile_settings.get('enable_partial_derisk', False)
-                    or drawdown_from_peak_pct <= -full_exit_drawdown_pct
+                    or drawdown_from_peak_pct <= -active_full_exit_drawdown_pct
                 )
                 partial_exit_required = (
                     profile_settings.get('enable_partial_derisk', False)
@@ -1756,6 +1888,7 @@ def backtest_enhanced_dual_ema(df, short_ema, long_ema, initial_capital=10000,
                     trades.append(('SELL', trade_marker, current_price, exit_value))
                     exit_reason = f"DRAWDOWN_EXIT ({drawdown_from_peak_pct:.2f}%)"
                     cooldown_counter = effective_cooldown_period
+                    carried_position_open = False
                 elif partial_exit_required:
                     previous_position = position
                     partial_value = set_target_exposure(current_price, partial_exit_target_exposure)
@@ -1840,7 +1973,11 @@ def backtest_enhanced_dual_ema(df, short_ema, long_ema, initial_capital=10000,
         'peak_price': peak_price,
         'cash_low_watermark': cash_low_watermark,
         'cooldown_counter': cooldown_counter,
-        'exposure_multiplier': exposure_multiplier
+        'exposure_multiplier': exposure_multiplier,
+        # True only when the position that entered this window is still open,
+        # so the caller knows whether grandfathered exit params must persist
+        # into the next window.
+        'carried_position_open': bool(carried_position_open and position > 1e-9),
     }
 
     if return_state:
@@ -2054,16 +2191,151 @@ def calculate_missed_upside_after_exits(df_result, trades):
     return missed_upside
 
 ###########################################################
+# --- GA warm start -----------------------------------------------------------
+# Each walk-forward window normally re-tunes from random guesses, so consecutive
+# windows can land on unrelated parameter sets (observed: short EMA 52 -> 45 -> 7
+# on MSFT). That produces a large step change at every offset-month boundary AND
+# a tuning noise floor far larger than the effects we try to measure. Warm
+# starting seeds part of the GA's initial population with the previous window's
+# winner so the search refines rather than restarts. See WARM_START_PLAN.md.
+DEFAULT_GA_WARM_START_FRACTION = 0.5
+# Jitter applied to inherited (non-elite) individuals, as a fraction of each
+# gene's own span. Small enough to stay in the same basin, large enough that the
+# seeded individuals are not duplicates of the elite.
+GA_WARM_START_JITTER_SCALE = 0.10
+# Gene order must match the gene_space built in genetic_optimize_params.
+GA_BASE_GENE_KEYS = (
+    'short_ema', 'long_ema', 'stop_loss', 'cooldown',
+    'drawdown_exit_pct', 'reentry_rebound_pct',
+    'rsi_oversold', 'rsi_overbought',
+)
+# Minimum spread between the fast and slow EMA spans. Two spans close together
+# track each other and cross on noise rather than on trend, so violating
+# individuals are rejected outright in fitness_func and repaired in
+# repair_gene_vector rather than wasting seeded slots.
+#
+# Lowered 40 -> 5 on 2026-08-07 to open the fast-crossover region the old floor
+# closed off. At 40 the constraint rejected 15.1% of the default (short, long)
+# grid and 14% of tuned windows landed within 5 of the floor, so this materially
+# changes the space the GA searches: runs recorded before that date were
+# searched under 40 and are NOT comparable to runs made after it.
+GA_MIN_EMA_SEPARATION = 5
+
+
+def snap_gene_to_space(value, spec):
+    """Clamp a gene to its gene_space cell, honouring a stepped grid.
+
+    Stepped specs are built as {'low': lo, 'high': hi + 1, 'step': 1}, i.e. the
+    upper edge is exclusive (numpy.arange semantics), so the largest legal value
+    is high - step, not high.
+    """
+    low = float(spec['low'])
+    high = float(spec['high'])
+    step = spec.get('step')
+    if step:
+        step = float(step)
+        highest = high - step
+        snapped = low + round((float(value) - low) / step) * step
+        return float(min(max(snapped, low), highest))
+    return float(min(max(float(value), low), high))
+
+
+def gene_span(spec):
+    step = spec.get('step')
+    high = float(spec['high']) - (float(step) if step else 0.0)
+    return max(high - float(spec['low']), 0.0)
+
+
+def gene_vector_from_params(params, gene_space, uses_take_profit_gene,
+                            uses_exposure_gene, default_exposure_multiplier):
+    """Encode a params dict back into the GA's gene ordering."""
+    values = [float(params[key]) for key in GA_BASE_GENE_KEYS]
+    if uses_take_profit_gene:
+        values.append(float(params.get(
+            'take_profit_pct', DEFAULT_STRATEGY_PARAMETERS['take_profit_pct']
+        )))
+    if uses_exposure_gene:
+        values.append(float(params.get('exposure_multiplier', default_exposure_multiplier)))
+    return [snap_gene_to_space(value, spec) for value, spec in zip(values, gene_space)]
+
+
+def repair_gene_vector(genes, elite_genes, gene_space):
+    """Restore the constraints fitness_func rejects outright.
+
+    Falls back to the elite's own values rather than inventing a nearby legal
+    pair, so a repaired individual is always one the previous window vouched for.
+    """
+    repaired = list(genes)
+    if repaired[1] - repaired[0] < GA_MIN_EMA_SEPARATION:
+        repaired[0], repaired[1] = elite_genes[0], elite_genes[1]
+    if repaired[6] >= repaired[7]:
+        repaired[6], repaired[7] = elite_genes[6], elite_genes[7]
+    return [snap_gene_to_space(value, spec) for value, spec in zip(repaired, gene_space)]
+
+
+def build_warm_start_population(warm_start_params, gene_space, pop_size,
+                                warm_start_fraction, uses_take_profit_gene,
+                                uses_exposure_gene, default_exposure_multiplier):
+    """Initial GA population: elite + jittered copies + fresh random draws.
+
+    Returns None when there is nothing to inherit, so the caller falls back to
+    pygad's own random initialization (today's behaviour).
+
+    At least one individual is always random: inheriting the entire population
+    would let the search anchor on a stale answer and stop adapting, which is
+    the one real risk of warm starting.
+    """
+    if not warm_start_params or pop_size <= 0:
+        return None
+    try:
+        elite = gene_vector_from_params(
+            warm_start_params, gene_space, uses_take_profit_gene,
+            uses_exposure_gene, default_exposure_multiplier,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    seeded_count = int(round(pop_size * max(0.0, min(1.0, float(warm_start_fraction)))))
+    seeded_count = max(1, seeded_count)
+    if pop_size >= 2:
+        seeded_count = min(seeded_count, pop_size - 1)
+    else:
+        seeded_count = min(seeded_count, pop_size)
+
+    population = [list(elite)]
+    for _ in range(seeded_count - 1):
+        jittered = [
+            value + np.random.normal(0.0, GA_WARM_START_JITTER_SCALE * gene_span(spec))
+            for value, spec in zip(elite, gene_space)
+        ]
+        population.append(repair_gene_vector(jittered, elite, gene_space))
+
+    for _ in range(pop_size - seeded_count):
+        random_solution = []
+        for spec in gene_space:
+            step = spec.get('step')
+            if step:
+                choices = np.arange(float(spec['low']), float(spec['high']), float(step))
+                random_solution.append(float(np.random.choice(choices)))
+            else:
+                random_solution.append(float(np.random.uniform(spec['low'], spec['high'])))
+        population.append(random_solution)
+
+    return population
+
+
 def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_ema_bounds=DEFAULT_LONG_EMA_BOUNDS,
-                           sl_bounds=DEFAULT_STOP_LOSS_BOUNDS, cd_bounds=DEFAULT_COOLDOWN_BOUNDS,
-                           drawdown_exit_bounds=DEFAULT_DRAWDOWN_EXIT_BOUNDS,
-                           reentry_rebound_bounds=DEFAULT_REENTRY_REBOUND_BOUNDS,
+                           sl_bounds=(8, 15), cd_bounds=(0, 3),
+                           drawdown_exit_bounds=(2.5, 4.0), reentry_rebound_bounds=(1.0, 3.0),
                            rsi_oversold_bounds=DEFAULT_RSI_OVERSOLD_BOUNDS,
                            rsi_overbought_bounds=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                            pop_size=50, generations=50, mutation_rate=0.1, crossover_rate=0.7,
                            initial_capital=10000, strategy_profile_name="generic",
                            ga_seed_value=None, gene_bound_overrides=None,
-                           take_profit_pct_value=None, **kwargs):
+                           take_profit_pct_value=None,
+                           warm_start_params=None,
+                           warm_start_fraction=DEFAULT_GA_WARM_START_FRACTION,
+                           **kwargs):
     """GA optimizer for index behavior using benchmark-relative fitness."""
     import pygad
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
@@ -2075,7 +2347,7 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
         cd_bounds,
         drawdown_exit_bounds,
         reentry_rebound_bounds,
-        gene_bound_overrides,
+        overrides=gene_bound_overrides,
     )
 
     gene_space = [
@@ -2091,33 +2363,27 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
     uses_take_profit_gene = take_profit_pct_value is not None
     if uses_take_profit_gene:
         gene_space.append({'low': 0.0, 'high': take_profit_pct_value})
-    exposure_bounds = get_exposure_bounds(strategy_profile_name, gene_bound_overrides)
+    exposure_bounds = get_exposure_bounds(strategy_profile_name)
     uses_exposure_gene = exposure_bounds[1] > exposure_bounds[0]
-    fixed_exposure_multiplier = float(exposure_bounds[0])
     if uses_exposure_gene:
         gene_space.append({'low': exposure_bounds[0], 'high': exposure_bounds[1]})
     num_genes = len(gene_space)
 
     def fitness_func(ga_instance, solution, solution_idx):
         short_ema, long_ema, sl, cd, drawdown_exit_pct, reentry_rebound_pct, rsi_oversold, rsi_overbought = solution[:8]
-        take_profit_pct = (
-            float(solution[8])
-            if uses_take_profit_gene
-            else DEFAULT_STRATEGY_PARAMETERS["take_profit_pct"]
-        )
+        take_profit_pct = float(solution[8]) if uses_take_profit_gene else DEFAULT_STRATEGY_PARAMETERS["take_profit_pct"]
         exposure_index = 8 + int(uses_take_profit_gene)
-        exposure_multiplier = (
-            float(solution[exposure_index])
-            if uses_exposure_gene
-            else fixed_exposure_multiplier
-        )
+        exposure_multiplier = float(solution[exposure_index]) if uses_exposure_gene else profile_settings.get("default_exposure_multiplier", 1.0)
         short_ema = int(short_ema)
         long_ema = int(long_ema)
         cd = int(cd)
         rsi_oversold = int(rsi_oversold)
         rsi_overbought = int(rsi_overbought)
 
-        if short_ema >= long_ema or (long_ema - short_ema) < 40 or rsi_oversold >= rsi_overbought:
+        # The separation test subsumes short_ema >= long_ema (that gives a gap of
+        # <= 0), so it needs no separate clause while GA_MIN_EMA_SEPARATION >= 1.
+        # Restore an explicit ordering check if it is ever set to 0.
+        if (long_ema - short_ema) < GA_MIN_EMA_SEPARATION or rsi_oversold >= rsi_overbought:
             return -np.inf
 
         split_idx = int(len(df) * 0.8)
@@ -2132,7 +2398,8 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
                 use_rsi_filter=True, rsi_oversold=rsi_oversold,
                 rsi_overbought=rsi_overbought, rsi_period=DEFAULT_RSI_PERIOD,
                 use_stop_loss=True, stop_loss_pct=sl,
-                use_take_profit=uses_take_profit_gene, take_profit_pct=take_profit_pct,
+                use_take_profit=uses_take_profit_gene,
+                take_profit_pct=take_profit_pct,
                 cooldown_period=cd, drawdown_exit_pct=drawdown_exit_pct,
                 reentry_rebound_pct=reentry_rebound_pct, start_invested=True, debug=False,
                 strategy_profile_name=strategy_profile_name,
@@ -2143,7 +2410,8 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
                 use_rsi_filter=True, rsi_oversold=rsi_oversold,
                 rsi_overbought=rsi_overbought, rsi_period=DEFAULT_RSI_PERIOD,
                 use_stop_loss=True, stop_loss_pct=sl,
-                use_take_profit=uses_take_profit_gene, take_profit_pct=take_profit_pct,
+                use_take_profit=uses_take_profit_gene,
+                take_profit_pct=take_profit_pct,
                 cooldown_period=cd, drawdown_exit_pct=drawdown_exit_pct,
                 reentry_rebound_pct=reentry_rebound_pct, start_invested=True, debug=False,
                 strategy_profile_name=strategy_profile_name,
@@ -2159,7 +2427,8 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
             use_rsi_filter=True, rsi_oversold=rsi_oversold,
             rsi_overbought=rsi_overbought, rsi_period=DEFAULT_RSI_PERIOD,
             use_stop_loss=True, stop_loss_pct=sl,
-            use_take_profit=uses_take_profit_gene, take_profit_pct=take_profit_pct,
+            use_take_profit=uses_take_profit_gene,
+            take_profit_pct=take_profit_pct,
             cooldown_period=cd, drawdown_exit_pct=drawdown_exit_pct,
             reentry_rebound_pct=reentry_rebound_pct, start_invested=True, debug=False,
             strategy_profile_name=strategy_profile_name,
@@ -2185,7 +2454,7 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
     try:
         window_start = df['Date'].iloc[0] if 'Date' in df.columns else df.index[0]
         window_end = df['Date'].iloc[-1] if 'Date' in df.columns else df.index[-1]
-        selected_ga_seed = ga_seed_value
+        selected_ga_seed = normalize_ga_seed(ga_seed_value)
         if selected_ga_seed is None:
             selected_ga_seed = build_deterministic_seed(
                 csv_name,
@@ -2204,6 +2473,22 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
             f" >>> {batch_name} ga10 pop_size={pop_size}, generations={generations}, "
             f"mutation_rate={mutation_rate}, crossover_rate={crossover_rate}, seed={selected_ga_seed}"
         )
+        # Built after seeding so the inherited/jittered/random mix is itself
+        # reproducible for a given seed.
+        warm_start_population = build_warm_start_population(
+            warm_start_params,
+            gene_space,
+            pop_size,
+            warm_start_fraction,
+            uses_take_profit_gene,
+            uses_exposure_gene,
+            profile_settings.get("default_exposure_multiplier", 1.0),
+        )
+        if warm_start_population is not None:
+            log_print(
+                f"Warm start: initial population seeded from previous window "
+                f"(pop={pop_size}, fraction={warm_start_fraction})"
+            )
         ga_instance = pygad.GA(num_generations=generations,
                                sol_per_pop=pop_size,
                                num_genes=num_genes,
@@ -2223,8 +2508,10 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
                                gene_space=gene_space,
                                mutation_probability=mutation_rate,
                                crossover_probability=crossover_rate,
-                               random_seed=selected_ga_seed)
-        
+                               random_seed=selected_ga_seed,
+                               **({"initial_population": warm_start_population}
+                                  if warm_start_population is not None else {}))
+
         ga_instance.run()
         
         solution, solution_fitness, solution_idx = ga_instance.best_solution()
@@ -2241,7 +2528,7 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
             'rsi_oversold': int(solution[6]),
             'rsi_overbought': int(solution[7]),
             'rsi_period': DEFAULT_RSI_PERIOD,
-            'exposure_multiplier': float(solution[8 + int(uses_take_profit_gene)]) if uses_exposure_gene else fixed_exposure_multiplier,
+            'exposure_multiplier': float(solution[8 + int(uses_take_profit_gene)]) if uses_exposure_gene else profile_settings.get("default_exposure_multiplier", 1.0),
             'effective_cooldown': int(solution[3]) + profile_settings['cooldown_extra_periods'],
             'effective_drawdown_exit_pct': solution[4] * profile_settings['drawdown_exit_multiplier'],
             'effective_reentry_rebound_pct': solution[5] * profile_settings['reentry_rebound_multiplier'],
@@ -2261,18 +2548,18 @@ def genetic_optimize_params(df, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_
 
 # Hyperparameter Tuning Function
 def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long_ema_bounds=DEFAULT_LONG_EMA_BOUNDS,
-                        sl_bounds=DEFAULT_STOP_LOSS_BOUNDS, cd_bounds=DEFAULT_COOLDOWN_BOUNDS,
-                        drawdown_exit_bounds=DEFAULT_DRAWDOWN_EXIT_BOUNDS,
-                        reentry_rebound_bounds=DEFAULT_REENTRY_REBOUND_BOUNDS,
+                        sl_bounds=(8,15), cd_bounds=(0,3),
+                        drawdown_exit_bounds=(2.5,4.0), reentry_rebound_bounds=(1.0,3.0),
                         rsi_oversold_bounds=DEFAULT_RSI_OVERSOLD_BOUNDS,
                         rsi_overbought_bounds=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                         initial_capital=10000, strategy_profile_name="generic",
                         ga_seed_value=None, mutation_rates_value=None,
                         crossover_rates_value=None, return_best_params=False,
                         run_metadata=None, window_metadata=None,
-                        strategy_parameter_metadata=None,
-                        gene_bound_overrides=None,
-                        take_profit_pct_value=None):
+                        strategy_parameter_metadata=None, gene_bound_overrides=None,
+                        record_history=True, take_profit_pct_value=None,
+                        warm_start_params=None,
+                        warm_start_fraction=DEFAULT_GA_WARM_START_FRACTION):
     """Grid search over GA hyperparameters for the index-specific objective."""
     log_print("\n=== GA HYPERPARAMETER TUNING PHASE ===")
     profile_settings = get_strategy_profile_settings(strategy_profile_name)
@@ -2284,24 +2571,15 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
         cd_bounds,
         drawdown_exit_bounds,
         reentry_rebound_bounds,
-        gene_bound_overrides,
+        overrides=gene_bound_overrides,
     )
-    exposure_bounds = get_exposure_bounds(strategy_profile_name, gene_bound_overrides)
-    effective_gene_bounds = {
-        "stop_loss": sl_bounds,
-        "cooldown": cd_bounds,
-        "drawdown_exit_pct": drawdown_exit_bounds,
-        "reentry_rebound_pct": reentry_rebound_bounds,
-        "exposure_multiplier": exposure_bounds,
-    }
     log_print(
-        "Effective gene bounds: "
+        "Profile gene bounds: "
         f"EMA short={short_ema_bounds}, EMA long={long_ema_bounds}, "
-        f"SL={sl_bounds}, TP={(0, take_profit_pct_value) if take_profit_pct_value is not None else 'disabled'}, "
-        f"CD={cd_bounds}, DDX={drawdown_exit_bounds}, "
+        f"SL={sl_bounds}, TP={(0, take_profit_pct_value) if take_profit_pct_value is not None else 'disabled'}, CD={cd_bounds}, DDX={drawdown_exit_bounds}, "
         f"RBR={reentry_rebound_bounds}, "
         f"RSI={rsi_oversold_bounds}/{rsi_overbought_bounds}, "
-        f"EXP={exposure_bounds}"
+        f"EXP={get_exposure_bounds(strategy_profile_name)}"
     )
     mut_ranges = mutation_rates_value if mutation_rates_value else [0.01, 0.05, 0.1, 0.15]
     cross_ranges = crossover_rates_value if crossover_rates_value else [0.6, 0.7, 0.8, 0.9]
@@ -2322,8 +2600,15 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
             initial_capital=initial_capital,
             strategy_profile_name=strategy_profile_name,
             ga_seed_value=ga_seed_value,
+            # Forwarded so the inner re-resolve keeps CLI precedence; without
+            # this the profile's own gene_bounds would win the override back.
             gene_bound_overrides=gene_bound_overrides,
             take_profit_pct_value=take_profit_pct_value,
+            # Every pop/gen/mut/cross combo in this grid inherits the same
+            # previous-window winner; the grid searches hyperparameters, not
+            # starting points.
+            warm_start_params=warm_start_params,
+            warm_start_fraction=warm_start_fraction,
         )
 
         if best_params is None:
@@ -2399,7 +2684,6 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
         results_df = pd.DataFrame([{
             'pop_size': 10, 'generations': 10, 'mutation_rate': 0.05, 'crossover_rate': 0.7,
             'best_short_ema': 0, 'best_long_ema': 0, 'best_stop_loss_pct': 0,
-            'best_take_profit_pct': 0,
             'best_cooldown': 0, 'best_drawdown_exit_pct': 0, 'best_reentry_rebound_pct': 0,
             'best_rsi_oversold': DEFAULT_STRATEGY_PARAMETERS["rsi_oversold"],
             'best_rsi_overbought': DEFAULT_STRATEGY_PARAMETERS["rsi_overbought"],
@@ -2424,7 +2708,6 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
     metadata.update(run_metadata or {})
     metadata.update(window_metadata or {})
     metadata.update(strategy_parameter_metadata or {})
-    metadata.update(build_gene_bound_metadata(gene_bound_overrides, effective_gene_bounds))
     if metadata:
         for key, value in metadata.items():
             results_df[key] = value
@@ -2450,27 +2733,171 @@ def tune_ga_hyperparams(df_tune, short_ema_bounds=DEFAULT_SHORT_EMA_BOUNDS, long
 
     log_print("\nGA Hyperparameter Tuning Results:")
     log_print(results_df.to_string(index=False))
-    # Disabled 2026-08-31: do not create per-run snapshots such as
-    # ga_tuning_summary_20260825_190816.csv. The same rows are retained in the
-    # per-fund tuning histories below. To re-enable snapshots, uncomment this
-    # block and the matching log line below.
-    # tune_csv = f"ga_tuning_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    # tune_csv = TUNINGS_DIR / tune_csv
-    # results_df.to_csv(tune_csv, index=False)
-    # Disabled 2026-08-31: do not append to the global
-    # outputs/tunings/backtest_tuning_history.csv file. Uncomment this line to
-    # restore the cumulative global tuning history.
-    # append_csv_rows(TUNING_HISTORY_FILE, results_df.to_dict("records"))
-    fund_label = metadata.get("fund_label")
-    if fund_label:
-        append_fund_history_rows(fund_label, "tuning", results_df.to_dict("records"))
-    refresh_top5_parameter_sets()
-    # log_print(f"\nFull results saved to: {tune_csv}")
+    # Per-run ga_tuning_summary_*.csv snapshots are intentionally not written: every row
+    # below is already appended to the cumulative and per-fund tuning histories.
+    if record_history:
+        append_csv_rows(TUNING_HISTORY_FILE, results_df.to_dict("records"))
+        fund_label = metadata.get("fund_label")
+        if fund_label:
+            # fund_label is already the fund group, so every history slice
+            # (AAPL / AAPL-3Y / AAPL-4Y) merges into funds/<group>/.
+            append_fund_history_rows(fund_label, "tuning", results_df.to_dict("records"))
+        refresh_top5_parameter_sets()
+        log_print(f"\nFull results appended to: {TUNING_HISTORY_FILE}")
     log_print(f"Best combo (max score {best_score:.3f}): pop={best_combo[0]}, gens={best_combo[1]}, mut={best_combo[2]}, cross={best_combo[3]}")
 
     if return_best_params:
         return best_combo, best_combo_params
     return best_combo
+
+# Exits within this many bars of a window boundary are inspected for
+# parameter-change artifacts ("phantom exits").
+TRANSITION_BOUNDARY_BARS = 5
+TRANSITION_EXIT_TYPES = ('SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'PARTIAL_SELL')
+# Genes compared when measuring how far the parameter set jumped between windows.
+TRANSITION_PARAM_KEYS = (
+    'short_ema', 'long_ema', 'stop_loss', 'take_profit_pct', 'cooldown',
+    'drawdown_exit_pct', 'reentry_rebound_pct', 'rsi_oversold',
+    'rsi_overbought', 'exposure_multiplier',
+)
+
+
+def transition_param_jump(prev_params, new_params):
+    """Mean normalized per-gene distance between consecutive window params."""
+    if prev_params is None:
+        return 0.0
+    distances = []
+    for key in TRANSITION_PARAM_KEYS:
+        old = float(prev_params.get(key, 0.0) or 0.0)
+        new = float(new_params.get(key, 0.0) or 0.0)
+        scale = max(abs(old), abs(new), 1e-9)
+        distances.append(abs(new - old) / scale)
+    return float(np.mean(distances)) if distances else 0.0
+
+
+def classify_phantom_exit(trade_type, exit_price, entry_price, running_peak,
+                          prev_params, new_params):
+    """True when an exit fires under the new window's thresholds but would not
+    have fired under the previous window's thresholds at the same price.
+
+    Threshold-only check (SL/TP/drawdown distance); the EMA-regime gate on
+    SELL exits is not re-simulated, so SELL classifications are approximate.
+    """
+    if prev_params is None:
+        return False
+    if trade_type == 'STOP_LOSS':
+        if entry_price <= 0:
+            return False
+        change_pct = (exit_price - entry_price) / entry_price * 100
+        return change_pct > -float(prev_params['stop_loss'])
+    if trade_type == 'TAKE_PROFIT':
+        if entry_price <= 0:
+            return False
+        if not prev_params.get('use_take_profit', False):
+            return True
+        change_pct = (exit_price - entry_price) / entry_price * 100
+        return change_pct < float(prev_params['take_profit_pct'])
+    if trade_type in ('SELL', 'PARTIAL_SELL'):
+        if running_peak <= 0:
+            return False
+        drawdown_pct = (exit_price - running_peak) / running_peak * 100
+        old_ddx = float(
+            prev_params.get('effective_drawdown_exit_pct',
+                            prev_params.get('drawdown_exit_pct', 0.0))
+        )
+        return drawdown_pct > -old_ddx
+    return False
+
+
+def build_transition_report_row(window_metadata, incoming_state, prev_params,
+                                new_params, trades, next_period_data):
+    """One transition_report.csv row describing a window boundary."""
+    incoming = incoming_state or {}
+    incoming_position = float(incoming.get('position', 0.0) or 0.0)
+    incoming_entry_price = float(incoming.get('entry_price', 0.0) or 0.0)
+    incoming_peak_price = float(incoming.get('peak_price', 0.0) or 0.0)
+    period_index = next_period_data.index
+    navs = next_period_data['NAV']
+
+    early_exits = []
+    first_exit_bar = None
+    for trade_type, trade_date, trade_price, _ in trades:
+        if trade_type not in TRANSITION_EXIT_TYPES:
+            continue
+        locations = period_index.get_indexer([pd.Timestamp(trade_date)])
+        bar_offset = int(locations[0])
+        if bar_offset < 0:
+            continue
+        if first_exit_bar is None:
+            first_exit_bar = bar_offset
+        if bar_offset < TRANSITION_BOUNDARY_BARS:
+            early_exits.append((trade_type, bar_offset, float(trade_price)))
+
+    phantom_count = 0
+    phantom_types = []
+    for trade_type, bar_offset, trade_price in early_exits:
+        running_peak = max(
+            incoming_peak_price,
+            float(navs.iloc[:bar_offset + 1].max()) if bar_offset >= 0 else 0.0,
+        )
+        if incoming_position > 0 and classify_phantom_exit(
+            trade_type, trade_price, incoming_entry_price, running_peak,
+            prev_params, new_params,
+        ):
+            phantom_count += 1
+            phantom_types.append(f"{trade_type}@bar{bar_offset}")
+
+    row = {
+        'window_sequence': window_metadata['window_sequence'],
+        'test_start': window_metadata['test_start'],
+        'test_end': window_metadata['test_end'],
+        'incoming_position': incoming_position,
+        'incoming_entry_price': incoming_entry_price,
+        'incoming_peak_price': incoming_peak_price,
+        'param_jump_distance': transition_param_jump(prev_params, new_params),
+        'trades_in_window': len(trades),
+        'boundary_exit_count': len(early_exits),
+        'boundary_exit_types': ';'.join(
+            f"{trade_type}@bar{bar_offset}" for trade_type, bar_offset, _ in early_exits
+        ),
+        'first_exit_bar': first_exit_bar if first_exit_bar is not None else '',
+        'phantom_exit_count': phantom_count,
+        'phantom_exit': phantom_count > 0,
+        'phantom_exit_types': ';'.join(phantom_types),
+        'boundary_bars': TRANSITION_BOUNDARY_BARS,
+    }
+    for key in TRANSITION_PARAM_KEYS:
+        row[f'prev_{key}'] = prev_params.get(key, '') if prev_params else ''
+        row[f'new_{key}'] = new_params.get(key, '')
+    return row
+
+
+def write_transition_report(transition_rows, fund_label, run_id, run_context=None):
+    """Persist per-window transition diagnostics next to parameter_schedule.csv."""
+    if not transition_rows:
+        return None
+    run_dir = run_artifact_dir(REPO_ROOT, fund_label, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    report_path = run_dir / "transition_report.csv"
+    frame = pd.DataFrame(transition_rows)
+    for key, value in (run_context or {}).items():
+        frame[key] = value
+    frame.to_csv(report_path, index=False)
+    return report_path
+
+
+def log_transition_summary(transition_rows):
+    if not transition_rows:
+        return
+    total = len(transition_rows)
+    boundary_windows = sum(1 for row in transition_rows if row['boundary_exit_count'] > 0)
+    phantom_windows = sum(1 for row in transition_rows if row['phantom_exit'])
+    log_print(
+        f"Transition diagnostics: {boundary_windows} of {total} windows had exits "
+        f"in the first {TRANSITION_BOUNDARY_BARS} bars; "
+        f"{phantom_windows} flagged as phantom (parameter-change artifacts)."
+    )
+
 
 def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                          pop_ranges_value, gen_ranges_value, initial_capital=10000,
@@ -2482,10 +2909,12 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                          rsi_overbought_bounds_value=DEFAULT_RSI_OVERBOUGHT_BOUNDS,
                          reuse_tuned_params_value=False, price_column_value="TotalReturn",
                          ga_search_preset_value="grid", profile_override_preset_value="default",
-                         fund_group_value=None, gene_bound_overrides=None,
+                         fund_group_value=None, gene_bound_overrides_value=None,
                          take_profit_pct_value=None,
                          rebuild_source_run_id_value="", rebuild_batch_id_value="",
-                         rebuild_mode_value=""):
+                         rebuild_mode_value="", transition_policy_value="none",
+                         ga_warm_start_value=False,
+                         ga_warm_start_fraction_value=DEFAULT_GA_WARM_START_FRACTION):
     """Run the full walk-forward GA backtest for a single CSV data source."""
     global log_file, csv_name, lookback_years, offset_months, pop_ranges
     global gen_ranges, mutation_rates, crossover_rates, reuse_tuned_params
@@ -2497,6 +2926,11 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
     skip_top5_refresh_for_run = False
     csv_path = resolve_input_csv_path(csv_file)
     csv_name = infer_fund_output_label(csv_path)
+    # Grouping key for the output folder / merged history AND the value recorded
+    # in the fund_label column. Defaults to the data-file label with any -NY
+    # history-slice suffix stripped (AAPL-3Y -> AAPL) so every slice of a ticker
+    # lands in one folder and aggregates as one fund; csv_name keeps the full
+    # slice label for filenames and the fund_slice_label column.
     fund_group = fund_group_value or fund_group_from_label(csv_name)
     lookback_years = lookback_years_value
     offset_months = offset_months_value
@@ -2508,35 +2942,20 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         normalize_ema_bounds(short_ema_bounds_value, "--short-ema-bounds"),
         normalize_ema_bounds(long_ema_bounds_value, "--long-ema-bounds"),
     )
-    gene_bound_overrides = normalize_gene_bound_overrides(gene_bound_overrides)
-    (
-        short_ema_bounds_value,
-        long_ema_bounds_value,
-        stop_loss_bounds_value,
-        cooldown_bounds_value,
-        drawdown_exit_bounds_value,
-        reentry_rebound_bounds_value,
-    ) = resolve_profile_gene_bounds(
+    # Resolve once here so the EFFECTIVE bounds (defaults <- profile <- CLI
+    # override) can be recorded in the run history. The GA re-resolves the same
+    # way internally; these values are what it will actually search.
+    (short_ema_bounds_value, long_ema_bounds_value, effective_sl_bounds,
+     effective_cd_bounds, effective_ddx_bounds, effective_rbr_bounds) = resolve_profile_gene_bounds(
         strategy_profile_value,
         short_ema_bounds_value,
         long_ema_bounds_value,
-        DEFAULT_STOP_LOSS_BOUNDS,
-        DEFAULT_COOLDOWN_BOUNDS,
-        DEFAULT_DRAWDOWN_EXIT_BOUNDS,
-        DEFAULT_REENTRY_REBOUND_BOUNDS,
-        gene_bound_overrides,
+        (8, 15),
+        (0, 3),
+        (2.5, 4.0),
+        (1.0, 3.0),
+        overrides=gene_bound_overrides_value,
     )
-    exposure_multiplier_bounds_value = get_exposure_bounds(
-        strategy_profile_value,
-        gene_bound_overrides,
-    )
-    effective_gene_bounds = {
-        "stop_loss": stop_loss_bounds_value,
-        "cooldown": cooldown_bounds_value,
-        "drawdown_exit_pct": drawdown_exit_bounds_value,
-        "reentry_rebound_pct": reentry_rebound_bounds_value,
-        "exposure_multiplier": exposure_multiplier_bounds_value,
-    }
     short_ema_bounds_value, long_ema_bounds_value = validate_ema_bounds(
         short_ema_bounds_value,
         long_ema_bounds_value,
@@ -2548,6 +2967,9 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
     reuse_tuned_params = reuse_tuned_params_value
     strategy_profile = strategy_profile_value
     ga_seed = ga_seed_value
+    transition_policy = str(transition_policy_value or "none")
+    ga_warm_start = bool(ga_warm_start_value)
+    ga_warm_start_fraction = float(ga_warm_start_fraction_value)
     batch_name = f"{csv_name}, {lookback_years}Y, {offset_months}M, profile={strategy_profile}"
     started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     machine_metadata = get_machine_metadata()
@@ -2567,8 +2989,6 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
     log_print(f"EMA bounds: short={short_ema_bounds_value}, long={long_ema_bounds_value}")
     log_print(f"RSI bounds: oversold={rsi_oversold_bounds_value}, overbought={rsi_overbought_bounds_value}")
     log_print(f"Take-profit: {take_profit_pct_value if take_profit_pct_value is not None else 'disabled'}")
-    log_print(f"Gene bound overrides: {gene_bound_overrides}")
-    log_print(f"Effective gene bounds: {effective_gene_bounds}")
     log_print(f"GA mutation rates: {mutation_rates if mutation_rates else 'default grid'}")
     log_print(f"GA crossover rates: {crossover_rates if crossover_rates else 'default grid'}")
     log_print(f"Reuse tuned params: {reuse_tuned_params}")
@@ -2585,7 +3005,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         df_clean = df_clean.sort_values('Date').reset_index(drop=True)
 
         preferred_price_col = price_column_value
-        fallback_price_cols = [preferred_price_col, 'TotalReturn', 'NAV', 'Close']
+        fallback_price_cols = [preferred_price_col, 'Adj Close', 'Close', 'TotalReturn', 'NAV']
         fallback_price_cols = list(dict.fromkeys([col for col in fallback_price_cols if col]))
         price_col = next((col for col in fallback_price_cols if col in df_clean.columns), None)
 
@@ -2597,12 +3017,15 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
 
         total_return_method = infer_total_return_method(df_clean, price_col)
 
-        if price_col == 'Close':
-            df_clean['NAV'] = df_clean['Close']
-            cols_to_drop = [col for col in ['High', 'Low', 'Open', 'Volume'] if col in df_clean.columns]
+        if price_col in ('Close', 'Adj Close'):
+            df_clean['NAV'] = df_clean[price_col]
+            cols_to_drop = [
+                col for col in ['High', 'Low', 'Open', 'Close', 'Adj Close', 'Volume']
+                if col in df_clean.columns and col != price_col
+            ]
             if cols_to_drop:
                 df_clean = df_clean.drop(columns=cols_to_drop)
-            log_print("Detected yfinance Close price format; using Close as internal NAV.")
+            log_print(f"Detected yfinance stock price format; using {price_col} as internal NAV.")
         elif price_col != 'NAV':
             if 'NAV' in df_clean.columns:
                 df_clean['Raw_NAV'] = df_clean['NAV']
@@ -2616,8 +3039,16 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         df_clean = df_clean.set_index('Date')
         df_clean['RSI'] = calculate_rsi(df_clean['NAV'], DEFAULT_RSI_PERIOD)
 
+        data_fingerprint = compute_data_fingerprint(df_clean)
+        try:
+            data_file_sha256 = compute_file_sha256(csv_path)
+        except OSError as exc:
+            data_file_sha256 = ""
+            log_print(f"WARNING: could not hash data file: {exc}")
+
         log_print(f"Loading data from {csv_path}...")
         log_print(f"Price data loaded from {price_col}: {len(df_clean)} valid data points")
+        log_print(f"Data fingerprint: {data_fingerprint[:16]} (file {data_file_sha256[:16]})")
         log_print(f"TotalReturn method: {total_return_method}")
         log_print(
             f"Date range: {df_clean.index.min().strftime('%Y-%m-%d')} "
@@ -2634,7 +3065,6 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "total_return_method": total_return_method,
             "lookback_years": lookback_years,
             "offset_months": offset_months,
-            "initial_capital": initial_capital,
             "strategy_profile": strategy_profile,
             "profile_override_preset": profile_override_preset_value,
             "ga_seed": ga_seed if ga_seed is not None else "deterministic",
@@ -2645,20 +3075,30 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "long_ema_bounds": long_ema_bounds_value,
             "rsi_oversold_bounds": rsi_oversold_bounds_value,
             "rsi_overbought_bounds": rsi_overbought_bounds_value,
-            "gene_bound_overrides": gene_bound_overrides,
-            "effective_gene_bounds": effective_gene_bounds,
+            # A hard constraint on the (short, long) EMA space -- individuals
+            # closer than this are rejected outright -- so two runs at different
+            # separations searched different spaces and must not share a run_id.
+            "ga_min_ema_separation": GA_MIN_EMA_SEPARATION,
             "mutation_rates": mutation_rates or "default grid",
             "crossover_rates": crossover_rates or "default grid",
-            "take_profit_max": take_profit_pct_value,
             "rebuild_source_run_id": rebuild_source_run_id_value,
             "rebuild_batch_id": rebuild_batch_id_value,
             "rebuild_mode": rebuild_mode_value,
+            "transition_policy": transition_policy,
+            "ga_warm_start": ga_warm_start,
+            "ga_warm_start_fraction": ga_warm_start_fraction if ga_warm_start else "",
+            # Two runs of the same config on different data vintages are
+            # different experiments and must not share a run_id.
+            "data_fingerprint": data_fingerprint,
         }
+        # run_id stays keyed on the slice label so ids remain slice-unique and
+        # traceable (merge_slice_history.py dedupes on run_id).
         run_id = build_run_id(started_at, csv_name, run_config_for_hash)
         run_metadata = build_run_metadata(
             run_id,
             csv_path,
             fund_group,
+            csv_name,
             price_col,
             df_clean.index.min(),
             df_clean.index.max(),
@@ -2683,14 +3123,26 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             rsi_overbought_bounds_value,
             machine_metadata=machine_metadata,
             total_return_method=total_return_method,
-            gene_bound_overrides=gene_bound_overrides,
-            effective_gene_bounds=effective_gene_bounds,
-            fund_slice_label=csv_name,
+            stop_loss_bounds_value=effective_sl_bounds,
+            cooldown_bounds_value=effective_cd_bounds,
+            drawdown_exit_bounds_value=effective_ddx_bounds,
+            reentry_rebound_bounds_value=effective_rbr_bounds,
             take_profit_max_value=take_profit_pct_value,
             rebuild_source_run_id=rebuild_source_run_id_value,
             rebuild_batch_id=rebuild_batch_id_value,
             rebuild_mode=rebuild_mode_value,
         )
+        run_metadata["transition_policy"] = transition_policy
+        run_metadata["ga_warm_start"] = ga_warm_start
+        run_metadata["ga_warm_start_fraction"] = (
+            ga_warm_start_fraction if ga_warm_start else ""
+        )
+        run_metadata["data_fingerprint"] = data_fingerprint
+        run_metadata["data_file_sha256"] = data_file_sha256
+        # Recorded so a sweep can tell runs searched under different EMA-separation
+        # floors apart. Rows written before this column existed were all produced
+        # under 40, which is what run_grid.ps1 assumes for a blank value.
+        run_metadata["ga_min_ema_separation"] = GA_MIN_EMA_SEPARATION
         strategy_parameter_metadata = build_strategy_parameter_metadata(
             {
                 "use_take_profit": take_profit_pct_value is not None,
@@ -2708,9 +3160,23 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         adaptive_results = []
         all_decisions = []
         all_trades = []
+        schedule_rows = []
         best_ga_params = None
         carry_state = None
         window_sequence = 0
+        transition_rows = []
+        prev_window_params = None
+        # Grandfather policy: exit params of the window that opened the
+        # currently carried position; None while flat or policy is "none".
+        active_exit_params = None
+        # Previous window's winning parameters, inherited by the next window's
+        # GA when --ga-warm-start is set. Stays None on the first window, which
+        # therefore always tunes from scratch.
+        warm_start_params = None
+        if transition_policy != "none":
+            log_print(f"Transition policy: {transition_policy}")
+        if ga_warm_start:
+            log_print(f"GA warm start: on (fraction={ga_warm_start_fraction})")
 
         log_print(
             f"\nStarting ga10 walk-forward optimization from "
@@ -2746,7 +3212,6 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     long_ema_bounds=long_ema_bounds_value,
                     rsi_oversold_bounds=rsi_oversold_bounds_value,
                     rsi_overbought_bounds=rsi_overbought_bounds_value,
-                    initial_capital=initial_capital,
                     strategy_profile_name=strategy_profile,
                     ga_seed_value=ga_seed,
                     mutation_rates_value=mutation_rates,
@@ -2755,8 +3220,10 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     run_metadata=run_metadata,
                     window_metadata=window_metadata,
                     strategy_parameter_metadata=strategy_parameter_metadata,
-                    gene_bound_overrides=gene_bound_overrides,
+                    gene_bound_overrides=gene_bound_overrides_value,
                     take_profit_pct_value=take_profit_pct_value,
+                    warm_start_params=warm_start_params if ga_warm_start else None,
+                    warm_start_fraction=ga_warm_start_fraction,
                 )
                 tuned_best_params = None
                 if reuse_tuned_params:
@@ -2808,8 +3275,10 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                     initial_capital=initial_capital,
                     strategy_profile_name=strategy_profile,
                     ga_seed_value=ga_seed,
-                    gene_bound_overrides=gene_bound_overrides,
+                    gene_bound_overrides=gene_bound_overrides_value,
                     take_profit_pct_value=take_profit_pct_value,
+                    warm_start_params=warm_start_params if ga_warm_start else None,
+                    warm_start_fraction=ga_warm_start_fraction,
                 )
             if best_params is None:
                 log_print(f"Skipping {current_date.strftime('%Y-%m-%d')}: No valid parameters")
@@ -2844,11 +3313,6 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 log_print(f"No data for period starting {current_date.strftime('%Y-%m-%d')}")
                 break
 
-            warmup_data = lookback_data.copy()
-            eval_data = pd.concat([warmup_data, next_period_data]).sort_index()
-            eval_data = eval_data[~eval_data.index.duplicated(keep='last')]
-            trade_start_idx = len(eval_data) - len(next_period_data)
-
             config = {
                 'use_rsi_filter': True,
                 'rsi_oversold': best_params['rsi_oversold'],
@@ -2864,20 +3328,30 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 'reentry_rebound_pct': best_params['reentry_rebound_pct'],
                 'exposure_multiplier': best_params.get('exposure_multiplier', 1.0),
                 'start_invested': carry_state is None,
-                'trade_start_idx': trade_start_idx,
+                'trade_start_idx': len(lookback_data),
                 'debug': True,
                 'strategy_profile_name': strategy_profile,
             }
             period_initial_capital = portfolio_value
-            df_result, total_return, num_trades, trades, period_win_rate, avg_return, decisions_df, _, _, carry_state = backtest_enhanced_dual_ema(
-                eval_data,
-                best_params['short_ema'],
-                best_params['long_ema'],
+            incoming_state = carry_state
+            df_result, total_return, num_trades, trades, period_win_rate, avg_return, decisions_df, _, _, carry_state = evaluate_parameter_window(
+                lookback_data,
+                next_period_data,
+                best_params,
                 portfolio_value,
-                initial_state=carry_state,
-                return_state=True,
-                **config
+                carry_state,
+                backtest_enhanced_dual_ema,
+                strategy_profile,
+                DEFAULT_RSI_PERIOD,
+                debug=True,
+                carry_exit_params=(
+                    active_exit_params if transition_policy == "grandfather" else None
+                ),
             )
+            if transition_policy == "grandfather":
+                active_exit_params = advance_carry_exit_params(
+                    active_exit_params, carry_state, best_params
+                )
             period_metrics = calculate_index_strategy_metrics(
                 df_result,
                 trades,
@@ -2911,7 +3385,6 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 "short_ema": best_params['short_ema'],
                 "long_ema": best_params['long_ema'],
                 "stop_loss": best_params['stop_loss'],
-                "take_profit_pct": best_params['take_profit_pct'],
                 "cooldown": best_params['cooldown'],
                 "drawdown_exit_pct": best_params['drawdown_exit_pct'],
                 "reentry_rebound_pct": best_params['reentry_rebound_pct'],
@@ -2941,6 +3414,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 "period_stop_loss_count": period_metrics['stop_loss_count'],
                 "recorded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
+            schedule_rows.append(window_row.copy())
             append_csv_row(WINDOW_HISTORY_FILE, window_row)
             append_fund_history_row(fund_group, "window", window_row)
             portfolio_history.append(
@@ -2956,7 +3430,21 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
                 'RSI_Filter_Block', 'RSI_Sell_Block', 'RSI_Buy_Block'
             ]].copy()
             adaptive_results.append(adaptive_df_period)
+            decisions_df['window_sequence'] = window_sequence
+            decisions_df['bars_since_window_start'] = range(len(decisions_df))
             all_decisions.append(decisions_df)
+            transition_rows.append(build_transition_report_row(
+                window_metadata,
+                incoming_state,
+                prev_window_params,
+                best_params,
+                trades,
+                next_period_data,
+            ))
+            prev_window_params = best_params
+            # Inherited by the next window's GA under --ga-warm-start. Recorded
+            # even when the flag is off so the two paths stay symmetrical.
+            warm_start_params = best_params
             current_date = next_period_end
 
             elapsed_at = now.strftime('%Y-%m-%d %H:%M:%S')
@@ -3076,9 +3564,16 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             for entry in history_fallback_files:
                 log_print(f"- {entry}")
 
+        def format_ga_rate_label(rates):
+            if not rates:
+                return "grid"
+            if len(rates) <= 3:
+                return ",".join(str(value) for value in rates)
+            return f"grid[{min(rates)}-{max(rates)}]x{len(rates)}"
+
         last_chart_params = params_history[-1] if params_history else None
-        mutation_label = ",".join(str(value) for value in mutation_rates) if mutation_rates else "default grid"
-        crossover_label = ",".join(str(value) for value in crossover_rates) if crossover_rates else "default grid"
+        mutation_label = format_ga_rate_label(mutation_rates)
+        crossover_label = format_ga_rate_label(crossover_rates)
         if last_chart_params:
             final_param_text = (
                 "Final selected params\n"
@@ -3090,25 +3585,22 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             )
         else:
             final_param_text = "Final selected params\nNo valid walk-forward parameter set"
+        warm_start_label = (
+            f"on ({ga_warm_start_fraction:.2f})" if ga_warm_start else "off"
+        )
         technical_param_text = (
             "Configured\n"
             f"Price: {price_col} | Lookback/offset: {lookback_years}Y/{offset_months}M | Profile: {strategy_profile}\n"
             f"EMA bounds: {short_ema_bounds_value}/{long_ema_bounds_value} | "
             f"RSI bounds: {rsi_oversold_bounds_value}/{rsi_overbought_bounds_value} | "
             f"GA: pop={pop_ranges}, gen={gen_ranges}, mut={mutation_label}, cross={crossover_label}\n"
+            f"Offset-month: transition={transition_policy} | warm-start={warm_start_label}\n"
             f"Best GA combo: {best_ga_params if best_ga_params is not None else 'not retuned'}\n\n"
             f"{final_param_text}"
         )
 
-        fig = plt.figure(figsize=(12, 9))
+        fig = plt.figure(figsize=(15, 12))
         grid = fig.add_gridspec(3, 1, height_ratios=[1.2, 0.8, 0.8])
-        chart_last_data_date = last_available_data_date(df_clean)
-        chart_context_label = build_chart_context_label(
-            df_clean,
-            backtest_data,
-            lookback_years,
-            offset_months,
-        )
 
         plt.subplot(grid[0])
         if not adaptive_df.empty and 'NAV' in adaptive_df.columns:
@@ -3136,14 +3628,16 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             x_sell = sell_signals['Date'] if 'Date' in sell_signals.columns else sell_signals.index
             plt.scatter(x_sell, sell_signals['NAV'], color='red', marker='v', s=100, label='Sell Signal', zorder=5)
 
-        set_chart_title(
-            plt.gca(),
-            f'Index-Tuned Adaptive Strategy {csv_name}-{lookback_years}Y-{offset_months}M',
-            chart_last_data_date,
-            fontsize=14,
-            fontweight='bold',
-            context_label=chart_context_label,
+        chart_title = build_backtest_chart_title(
+            fund_group,
+            df_clean.index.min(),
+            df_clean.index.max(),
+            lookback_years,
+            offset_months,
+            start_date,
+            end_date,
         )
+        plt.title(chart_title, fontsize=14, fontweight='bold')
         plt.gca().text(
             0.01,
             0.98,
@@ -3170,13 +3664,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         else:
             plt.axhline(y=DEFAULT_STRATEGY_PARAMETERS["rsi_oversold"], color='g', linestyle='--', alpha=0.7, label='Oversold Guard')
             plt.axhline(y=DEFAULT_STRATEGY_PARAMETERS["rsi_overbought"], color='r', linestyle='--', alpha=0.7, label='Overbought Guard')
-        set_chart_title(
-            plt.gca(),
-            'RSI Indicator (GA-Tuned Entry/Exit Guards)',
-            chart_last_data_date,
-            fontsize=12,
-            context_label=chart_context_label,
-        )
+        plt.title('RSI Indicator (GA-Tuned Entry/Exit Guards)', fontsize=12)
         plt.ylabel('RSI')
         plt.legend()
         plt.grid(True, alpha=0.3)
@@ -3192,14 +3680,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
         else:
             log_print("Skipping buy-and-hold chart line because no forward-test dates are available.")
 
-        set_chart_title(
-            plt.gca(),
-            'Portfolio Value Comparison',
-            chart_last_data_date,
-            fontsize=14,
-            fontweight='bold',
-            context_label=chart_context_label,
-        )
+        plt.title('Portfolio Value Comparison', fontsize=14, fontweight='bold')
         plt.xlabel('Date')
         plt.ylabel('Portfolio Value')
         plt.legend()
@@ -3210,12 +3691,7 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
 
         formatted = datetime.now().strftime("%Y%m%d-%H%M%S")
         png_file = CHARTS_DIR / f"{csv_name}-{lookback_years}Y-{offset_months}M-{strategy_profile}-ga10-tuned-{formatted}.png"
-        plt.savefig(
-            png_file,
-            dpi=150,
-            bbox_inches="tight",
-            pil_kwargs={"compress_level": 9, "optimize": True},
-        )
+        save_figure_png(fig, png_file)
         plt.close()
         log_print(f"\nChart saved to: {png_file}")
 
@@ -3232,8 +3708,55 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             )
         )
         last_params = params_history[-1] if params_history else None
+        try:
+            replay_artifacts = save_replay_artifacts(
+                df_clean,
+                schedule_rows,
+                REPO_ROOT,
+                fund_group,
+                run_id,
+            )
+            log_print(
+                "Replay artifacts saved: "
+                f"{replay_artifacts['source_snapshot_file']} and "
+                f"{replay_artifacts['parameter_schedule_file']}"
+            )
+        except Exception as exc:
+            replay_artifacts = {
+                "replay_schema_version": 1,
+                "source_snapshot_file": "",
+                "source_snapshot_sha256": "",
+                "parameter_schedule_file": "",
+                "parameter_schedule_sha256": "",
+                "replay_status": "artifact_write_failed",
+                "schedule_window_count": len(schedule_rows),
+                "replay_error": str(exc),
+            }
+            log_print(f"WARNING: Could not save replay artifacts: {exc}")
+        try:
+            transition_report_path = write_transition_report(
+                transition_rows,
+                fund_group,
+                run_id,
+                run_context={
+                    "run_id": run_id,
+                    "fund_label": csv_name,
+                    "fund_group": fund_group,
+                    "lookback_years": lookback_years,
+                    "offset_months": offset_months,
+                    "strategy_profile": strategy_profile,
+                    "transition_policy": transition_policy,
+                    "data_fingerprint": data_fingerprint,
+                },
+            )
+            if transition_report_path is not None:
+                log_print(f"Transition report saved: {transition_report_path}")
+            log_transition_summary(transition_rows)
+        except Exception as exc:
+            log_print(f"WARNING: Could not save transition report: {exc}")
         run_row = {
             **run_metadata,
+            **replay_artifacts,
             "run_completed_at": completed_at,
             "run_status": "completed" if len(backtest_data) > 0 else "insufficient_data",
             "duration": str(duration),
@@ -3272,8 +3795,40 @@ def run_backtest_for_csv(csv_file, lookback_years_value, offset_months_value,
             "last_rsi_period": DEFAULT_RSI_PERIOD if last_params else "",
             "last_exposure_multiplier": last_params[9] if last_params else "",
         }
+        if rebuild_mode_value == "latest_data":
+            run_row["replay_status"] = "rebuilt_latest_data"
         append_csv_row(RUN_HISTORY_FILE, run_row)
         append_fund_history_row(fund_group, "run", run_row)
+
+        # Per-run CSV reports (signals, trades, summary) for later display.
+        reports_dir = fund_output_dirs(fund_group)["reports"]
+        report_prefix = f"{sanitize_fund_folder_name(csv_name)}-{lookback_years}Y-{offset_months}M"
+
+        if not adaptive_df.empty:
+            signal_cols = [
+                col for col in [
+                    'Date', 'NAV', 'Short_EMA_Value', 'Long_EMA_Value', 'RSI',
+                    'EMA_Signal', 'Final_Signal', 'Position', 'Exposure', 'Portfolio_Value',
+                ] if col in adaptive_df.columns
+            ]
+            signals_df = adaptive_df[signal_cols].copy()
+            if 'Position' in signals_df.columns:
+                pos_diff = signals_df['Position'].diff().fillna(signals_df['Position'])
+                signals_df['Trade_Action'] = np.where(pos_diff > 0, 'BUY', np.where(pos_diff < 0, 'SELL', ''))
+            signals_csv = reports_dir / f"{report_prefix}-signals-{formatted}.csv"
+            write_csv_with_lock_resilience(signals_df, signals_csv, purpose="Signals report write")
+            log_print(f"Signals report saved to: {signals_csv}")
+
+        if all_trades:
+            trades_df = pd.DataFrame(all_trades, columns=['Trade_Type', 'Date', 'Price', 'Trade_Value'])
+            trades_csv = reports_dir / f"{report_prefix}-trades-{formatted}.csv"
+            write_csv_with_lock_resilience(trades_df, trades_csv, purpose="Trades report write")
+            log_print(f"Trades report saved to: {trades_csv}")
+
+        summary_csv = reports_dir / f"{report_prefix}-summary-{formatted}.csv"
+        write_csv_with_lock_resilience(pd.DataFrame([run_row]), summary_csv, purpose="Summary report write")
+        log_print(f"Summary report saved to: {summary_csv}")
+
         refresh_top5_parameter_sets()
 
         log_print("\n=== COMPLETED ===")
@@ -3317,11 +3872,19 @@ if __name__ == "__main__":
         normalize_ema_bounds(args.rsi_oversold_bounds, "--rsi-oversold-bounds", minimum=0),
         normalize_ema_bounds(args.rsi_overbought_bounds, "--rsi-overbought-bounds", minimum=1),
     )
-    gene_bound_overrides = build_gene_bound_overrides_from_args(args)
-    if args.initial_capital <= 0:
-        raise ValueError("--initial-capital must be > 0")
+    # Only the genes actually named on the command line become overrides; the
+    # rest stay None so the profile keeps control of them.
+    gene_bound_overrides = {
+        "stop_loss": normalize_range_bounds(args.stop_loss_bounds, "--stop-loss-bounds"),
+        "cooldown": normalize_range_bounds(args.cooldown_bounds, "--cooldown-bounds", as_int=True),
+        "drawdown_exit_pct": normalize_range_bounds(args.drawdown_exit_bounds, "--drawdown-exit-bounds"),
+        "reentry_rebound_pct": normalize_range_bounds(args.reentry_rebound_bounds, "--reentry-rebound-bounds"),
+    }
     if args.take_profit_pct is not None and not 0 <= args.take_profit_pct <= 100:
         raise ValueError("--take-profit-pct must be between 0 and 100")
+    if any(v is not None for v in gene_bound_overrides.values()):
+        log_print("Gene bound overrides from CLI: %s" % {
+            k: v for k, v in gene_bound_overrides.items() if v is not None})
     if args.ga_search_preset == "focused":
         mutation_rates = normalize_float_ranges(args.mutation_rates, [0.01])
         crossover_rates = normalize_float_ranges(args.crossover_rates, [0.6])
@@ -3340,9 +3903,7 @@ if __name__ == "__main__":
         f"pop_ranges={pop_ranges}, gen_ranges={gen_ranges}, symbols={args.symbols}, "
         f"short_ema_bounds={short_ema_bounds}, long_ema_bounds={long_ema_bounds}, "
         f"rsi_oversold_bounds={rsi_oversold_bounds}, rsi_overbought_bounds={rsi_overbought_bounds}, "
-        f"gene_bound_overrides={gene_bound_overrides}, "
         f"download_years={args.download_years}, ga_seed={args.ga_seed}, "
-        f"initial_capital={args.initial_capital}, "
         f"take_profit_pct={args.take_profit_pct if args.take_profit_pct is not None else 'disabled'}, "
         f"data_file={args.data_file}, data_files={args.data_files}, data_glob={args.data_glob}, "
         f"price_column={args.price_column}, profile_override_preset={args.profile_override_preset}, "
@@ -3363,7 +3924,7 @@ if __name__ == "__main__":
         local_fund_files = sorted(str(path.resolve()) for path in DATA_DIR.glob(args.data_glob))
         if local_fund_files:
             downloaded_files.extend(local_fund_files)
-            print(f"Found {len(local_fund_files)} local CSV file(s) in {DATA_DIR} matching {args.data_glob}.")
+            print(f"Found {len(local_fund_files)} local stock CSV file(s) in {DATA_DIR} matching {args.data_glob}.")
         else:
             if args.download_years <= 0:
                 raise ValueError("download_years must be > 0")
@@ -3394,9 +3955,12 @@ if __name__ == "__main__":
             ga_search_preset_value=args.ga_search_preset,
             profile_override_preset_value=args.profile_override_preset,
             fund_group_value=args.fund_group,
-            gene_bound_overrides=gene_bound_overrides,
+            gene_bound_overrides_value=gene_bound_overrides,
             take_profit_pct_value=args.take_profit_pct,
             rebuild_source_run_id_value=args.rebuild_source_run_id,
             rebuild_batch_id_value=args.rebuild_batch_id,
             rebuild_mode_value=args.rebuild_mode,
+            transition_policy_value=args.transition_policy,
+            ga_warm_start_value=args.ga_warm_start,
+            ga_warm_start_fraction_value=args.ga_warm_start_fraction,
         )

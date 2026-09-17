@@ -53,6 +53,6 @@ set "FILE=%~2"
 echo [%date% %time%] >> "%LOG%"
 echo "%NO%. %FILE%" >> "%LOG%"
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '.\run.ps1' -Population 4 -Generations 2 -GaSearchPreset grid -ExtraArgs @('--data-file', '.\data\%FILE%')"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '.\run2.ps1' -Population 4 -Generations 2 -GaSearchPreset grid -ExtraArgs @('--data-file', '.\data\%FILE%')"
 
 exit /b

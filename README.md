@@ -137,8 +137,9 @@ Each run generates:
 
 - A text log file in `outputs/logs/` such as `MAPF_Progress-2Y-6M-generic-ga10-YYYYMMDD_HHMMSS.txt`
 - A chart PNG in `outputs/charts/` such as `MAPF_Progress-2Y-6M-generic-ga10-tuned-YYYYMMDD-HHMMSS.png`
-- A GA tuning summary in `outputs/tunings/` such as `ga_tuning_summary_YYYYMMDD_HHMMSS.csv`
-- Persistent tuning history CSVs in `outputs/tunings/`, including the EMA bounds used plus the winning EMA, RSI, stop-loss, cooldown, drawdown-exit, reentry-rebound, and exposure values selected by GA
+- Persistent run/window histories and per-fund tuning histories, including the EMA bounds used plus the winning EMA, RSI, stop-loss, cooldown, drawdown-exit, reentry-rebound, and exposure values selected by GA
+- Global `outputs/tunings/backtest_tuning_history.csv` appends are disabled; the clearly marked line in `tune_ga_hyperparams` can be uncommented to restore them
+- Per-run `ga_tuning_summary_YYYYMMDD_HHMMSS.csv` snapshots are disabled; the clearly marked block in `tune_ga_hyperparams` can be uncommented to restore them
 
 ### Strategy Review Dashboard
 

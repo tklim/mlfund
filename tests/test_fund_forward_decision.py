@@ -288,6 +288,47 @@ class MethodologyTests(unittest.TestCase):
         self.assertAlmostEqual(result["Base Relative Upside Probability"], base_up)
         self.assertAlmostEqual(result["Relative Upside Probability Lift"], conditional_up - base_up)
 
+    def test_empty_columnless_analogs_produce_a_low_confidence_summary(self):
+        forward = pd.DataFrame(
+            {
+                "Start Date": pd.to_datetime(["2024-01-01", "2024-07-01"]),
+                "End Date": pd.to_datetime(["2024-06-01", "2024-12-01"]),
+                "Forward Return": [0.02, -0.01],
+            }
+        )
+        latest = pd.Series(
+            {
+                "Date": pd.Timestamp("2025-01-01"),
+                "TotalReturn": 1.0,
+                "Trend State": "uptrend",
+                "Trailing Return 1M": 0.01,
+                "Trailing Return 3M": 0.03,
+                "Trailing Return 6M": 0.08,
+                "Drawdown From 6M High": 0.0,
+                "Drawdown From 1Y High": 0.0,
+                "Rebound From 3M Low": 0.08,
+                "Annualized Volatility 3M": 0.10,
+                "RSI 14": 55.0,
+                "EMA 50/200 Gap": 0.02,
+                "EMA 200 Slope 1M": 0.01,
+            }
+        )
+        args = SimpleNamespace(
+            forward_method=DEFAULT_FORWARD_METHOD,
+            upside_target=0.15,
+            downside_risk=-0.08,
+            primary_horizon_days=126,
+            target_scaling="compounded",
+            prior_strength=4.0,
+            min_analogs=4,
+        )
+
+        result = summarize_analogs("A", latest, "6M", 126, pd.DataFrame(), forward, args)
+
+        self.assertEqual(result["Analog Count"], 0)
+        self.assertEqual(result["Confidence Level"], "LOW")
+        self.assertTrue(pd.isna(result["Expected Forward Return"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -391,7 +391,10 @@ def metric_or_nan(series, fn):
 
 
 def summarize_analogs(fund_label, latest_row, horizon_label, horizon_days, analogs, forward_frame, args):
-    returns = analogs["Forward Return"].dropna()
+    # ``nearest_analogs`` returns a column-less frame when there are no eligible
+    # feature/return matches.  Treat that as a valid zero-analog result so one
+    # short or sparse fund does not abort an --all run.
+    returns = analogs.get("Forward Return", pd.Series(dtype=float)).dropna()
     analog_count = len(returns)
     method = getattr(args, "forward_method", DEFAULT_FORWARD_METHOD)
     primary_horizon_days = getattr(args, "primary_horizon_days", horizon_days)
