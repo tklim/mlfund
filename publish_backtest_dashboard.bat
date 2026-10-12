@@ -19,5 +19,5 @@ if "%PUBLISH_EXIT%"=="0" (
 ) else (
   echo Backtest dashboard publishing failed with exit code %PUBLISH_EXIT%.
 )
-pause
+REM pause
 exit /b %PUBLISH_EXIT%
